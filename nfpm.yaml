@@ -1,0 +1,30 @@
+name: fpgas-online-cam
+arch: armhf
+platform: linux
+version: 0.1.0
+maintainer: fpgas.online <apt@fpgas.online>
+description: Camera capture and GStreamer streaming for fpgas.online Pi boards
+license: Apache-2.0
+depends:
+  - gstreamer1.0-tools
+  - gstreamer1.0-plugins-base
+  - gstreamer1.0-plugins-good
+  - libcamera-tools
+contents:
+  - src: cam.sh
+    dst: /usr/local/bin/fpgas-cam.sh
+    file_info:
+      mode: 0755
+  - src: gst-libcam.sh
+    dst: /usr/local/bin/fpgas-gst-libcam.sh
+    file_info:
+      mode: 0755
+  - src: gst-libcam-yt.sh
+    dst: /usr/local/bin/fpgas-gst-libcam-yt.sh
+    file_info:
+      mode: 0755
+  - src: cam.service
+    dst: /usr/lib/systemd/system/fpgas-cam.service
+scripts:
+  postinstall: |
+    systemctl daemon-reload
