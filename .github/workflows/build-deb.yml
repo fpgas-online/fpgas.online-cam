@@ -1,0 +1,46 @@
+name: Build deb package
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nfpm
+        run: |
+          gh release download --repo goreleaser/nfpm --pattern 'nfpm_*_Linux_x86_64.tar.gz' --dir .
+          tar xzf nfpm_*.tar.gz nfpm
+          chmod +x nfpm
+
+      - name: Build deb (armhf)
+        run: ./nfpm package --packager deb --target dist/
+
+      - name: Upload deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: dist/*.deb
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger apt repo update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.APT_REPO_TOKEN }}
+          repository: fpgas-online/apt
+          event-type: receive-deb
+          client-payload: |
+            {
+              "package_name": "fpgas-online-cam",
+              "package_version": "${{ github.ref_name }}",
+              "run_id": "${{ github.run_id }}",
+              "source_repo": "${{ github.repository }}"
+            }
