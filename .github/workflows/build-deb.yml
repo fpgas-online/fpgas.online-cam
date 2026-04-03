@@ -20,7 +20,9 @@ jobs:
           chmod +x nfpm
 
       - name: Build deb (armhf)
-        run: ./nfpm package --packager deb --target dist/
+        run: |
+          mkdir -p dist
+          ./nfpm package --packager deb --target dist/
 
       - name: Upload deb artifact
         uses: actions/upload-artifact@v4
