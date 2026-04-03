@@ -26,5 +26,4 @@ contents:
   - src: cam.service
     dst: /usr/lib/systemd/system/fpgas-cam.service
 scripts:
-  postinstall: |
-    systemctl daemon-reload
+  postinstall: postinstall.sh
