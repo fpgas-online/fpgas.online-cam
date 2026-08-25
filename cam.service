@@ -10,6 +10,6 @@ Wants=network-online.target
 StartLimitInterval=0
 
 [Service]
-ExecStart=/usr/local/bin/gst-libcam.sh
+ExecStart=/usr/local/bin/fpgas-gst-libcam.sh
 Restart=always
 RestartSec=1
