@@ -1,7 +1,7 @@
 name: fpgas-online-cam
 arch: all
 platform: linux
-version: "${VERSION:-0.0.1}"
+version: "${VERSION}"
 maintainer: fpgas.online <apt@fpgas.online>
 description: Camera capture and GStreamer streaming for fpgas.online Pi boards
 license: Apache-2.0
