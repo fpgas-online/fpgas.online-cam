@@ -1,15 +1,56 @@
-name: Build deb package
+name: Build and publish deb
 
+# Rolling release: every GREEN push to main builds fpgas-online-cam and
+# publishes it as an asset on the current series' rolling GitHub Release
+# (the nearest vX.Y tag, e.g. v0.0). No tokens involved: the
+# fpgas-online/apt repo enumerates all releases and pulls in any asset it
+# does not yet have. The package is Architecture: all (shell scripts +
+# systemd unit), so it builds on the default runner and installs on any
+# Debian arch. The version is git-derived (vX.Y at a tag, vX.Y.postN
+# after it) via packaging/deb-version.py.
+#
+# Gated on CI: triggered when the "Lint" workflow completes for main, and
+# the publish step only runs when that run succeeded, so a red commit never
+# reaches the release. push:tags stays for cutting a new series directly,
+# and workflow_dispatch for manual re-runs.
+#
+# Ported from fpgas-online/fpgas.online-tt (tweed rebuild B1-8/B1-9,
+# 2026-08-25): the old tag-gated workflow never published — no v* tag was
+# ever pushed, so the fpgas.online apt repo never carried this package.
 on:
+  workflow_run:
+    workflows: [Lint]
+    types: [completed]
+    branches: [main]
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write # to create/update the current series GitHub Release
+
 jobs:
   build:
+    # workflow_run fires on every completion (failure/cancelled too), and
+    # `branches: [main]` above matches the *head* branch name -- which for a
+    # pull request from a fork is the fork's branch, so a fork branch called
+    # `main` would otherwise get its code built and published here with
+    # `contents: write`. Only a successful Lint run of a push to this repo's
+    # own main is a release.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Pin to the SHA CI validated, not the default-branch HEAD (which a
+          # workflow_run checkout would otherwise use and may already be past).
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0 # full history + tags so deb-version.py can describe
 
       - name: Install nfpm
         env:
@@ -19,32 +60,34 @@ jobs:
           tar xzf nfpm_*.tar.gz nfpm
           chmod +x nfpm
 
-      - name: Build deb (armhf)
+      - name: Build deb (arch all)
         run: |
+          VERSION="$(python3 packaging/deb-version.py)"
+          export VERSION
+          echo "VERSION=$VERSION"
           mkdir -p dist
           ./nfpm package --packager deb --target dist/
+          ls -l dist/
 
-      - name: Upload deb artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: deb-package
           path: dist/*.deb
 
-  publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Trigger apt repo update
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.APT_REPO_TOKEN }}
-          repository: fpgas-online/apt
-          event-type: receive-deb
-          client-payload: |
-            {
-              "package_name": "fpgas-online-cam",
-              "package_version": "${{ github.ref_name }}",
-              "run_id": "${{ github.run_id }}",
-              "source_repo": "${{ github.repository }}"
-            }
+      - name: Publish deb to the current series release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SERIES="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+          if [ -z "$SERIES" ]; then
+            echo "::error::no vX.Y series tag reachable from this commit; push one (e.g. git tag -a v0.0 <root-commit> && git push origin v0.0) and re-run"
+            exit 1
+          fi
+          if ! gh release view "$SERIES" >/dev/null 2>&1; then
+            gh release create "$SERIES" --prerelease \
+              --title "Debian packages (rolling, series $SERIES)" \
+              --notes "Rolling .deb builds of fpgas-online-cam for series $SERIES: one asset per green commit on main (version from git describe). Consumed by https://github.com/fpgas-online/apt."
+          fi
+          gh release upload "$SERIES" dist/*.deb --clobber
+          echo "Published to release $SERIES: $(ls dist/*.deb)"
