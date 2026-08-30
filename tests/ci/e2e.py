@@ -58,8 +58,12 @@ def main() -> int:
     args = ap.parse_args()
 
     prefix = Path(tempfile.mkdtemp(prefix="cam-e2e-"))
+    # When run as root (docker/CI) nginx's workers drop to www-data, which
+    # must read www/ and write HLS files into hls/; mkdtemp gives 0700.
+    prefix.chmod(0o755)
     for d in ("hls", "www", "tmp"):
         (prefix / d).mkdir()
+        (prefix / d).chmod(0o777)  # mkdir(mode=) is masked by umask
     shutil.copy(CI / "player.html", prefix / "www" / "player.html")
     conf = prefix / "nginx.conf"
     conf.write_text((CI / "nginx.conf").read_text().replace("@PREFIX@", str(prefix)))
@@ -73,9 +77,11 @@ def main() -> int:
         wait_for("nginx http", lambda: http_get("/player.html").startswith("<!DOCTYPE"), 15)
 
         env = dict(os.environ,
-                   CAM_SRC="videotestsrc is-live=true pattern=ball ! video/x-raw,width=1280,height=720",
+                   # capsfilter as an element: gst-launch grammar does not allow
+                   # "caps ! caps" and the script adds its own caps after CAM_SRC.
+                   CAM_SRC="videotestsrc is-live=true pattern=ball ! capsfilter caps=video/x-raw,width=1280,height=720",
                    RTMP_DEST=RTMP, FPS=str(args.fps), GOP=str(args.gop or args.fps))
-        cam = subprocess.Popen(["bash", str(REPO / "gst-libcam.sh")], env=env,
+        cam = subprocess.Popen(["bash", "-x", str(REPO / "gst-libcam.sh")], env=env,  # -x as the shebang has
                                stdout=(prefix / "cam.out").open("w"), stderr=subprocess.STDOUT)
         procs.append(cam)
         # Playlist appears once the first fragment closes; needs >= 3 entries for VHS to play live.

@@ -25,6 +25,9 @@ Locally, with docker:
     docker build -t fpgas-cam-e2e -f tests/ci/Dockerfile tests/ci
     docker run --rm -v "$PWD:/src:ro" fpgas-cam-e2e uv run --no-project tests/ci/e2e.py
 
+(Add `--network host` to both if containers on your machine have no DNS, as
+on ten64.) Everything binds 127.0.0.1:18080 (http) and :11935 (rtmp).
+
 Playwright's own Chromium has no H.264 and cannot play this stream at all
 (video.js: `MEDIA_ERR_SRC_NOT_SUPPORTED`); the image uses Debian's chromium.
 
