@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- Minimal stand-in for the fpgas.online board pages: the same video.js
+     8.4.0 (VHS) player the site uses, pointed at ?src=<m3u8>. The
+     measurement tool only needs a <video class="video-js"> whose .player is
+     video.js. -->
+<html><head><meta charset="utf-8"><title>latency test player</title>
+<link href="https://vjs.zencdn.net/8.4.0/video-js.min.css" rel="stylesheet">
+<script src="https://vjs.zencdn.net/8.4.0/video.min.js"></script>
+</head><body>
+<video id="tt-video" class="video-js" width="640" height="360" controls autoplay muted playsinline preload="auto"></video>
+<script>
+  const src = new URLSearchParams(location.search).get('src') || '/live/test.m3u8';
+  videojs('tt-video', {}, function () { this.src({ src, type: 'application/x-mpegURL' }); });
+</script>
+</body></html>
