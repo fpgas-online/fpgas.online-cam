@@ -14,7 +14,8 @@ mirrors the infra repo's `pib.conf.j2` / `live-hls.conf.j2` -- keep them in
 step), runs the real `gst-libcam.sh` with `CAM_SRC=videotestsrc` and
 `RTMP_DEST=rtmp://127.0.0.1:11935/pib/test`, opens `tests/ci/player.html`
 (the site's video.js 8.4.0) in Debian's chromium and fails if the median
-measured latency exceeds `--max-latency` (8 s; ~5 s expected).
+measured latency exceeds `--max-latency` (8 s; it measures ~4.5 s, and 32 s
+with the old 60-frame GOP via `--gop 60`).
 
 CI exercises the `x264enc` branch of the script; the Pi 4's `v4l2h264enc`
 branch (keyframe interval via `h264_i_frame_period`) can only be checked on
@@ -39,7 +40,7 @@ an H.264-capable Chromium and tesseract (or from the docker image):
     node tests/measure-latency.mjs https://tinytapeout.fpgas.online/board/tt04/ \
         --samples 5 --source-tz Europe/London
 
-`--source-tz` is the zone of the clock in the picture, i.e. the Pi's local
+(41.9 s measured this way on 2026-08-30 before the fix.) `--source-tz` is the zone of the clock in the picture, i.e. the Pi's local
 zone (`date +%Z` on the Pi); the Pis and the viewer must both be NTP-synced.
 Besides the OCR'd glass-to-glass figure it prints
 `newest_listed_fragment_age_s`, the structural part video.js can see: the
