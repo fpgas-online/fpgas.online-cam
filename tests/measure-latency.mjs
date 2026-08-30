@@ -18,11 +18,24 @@
 // zone); default is this machine's zone, right for the CI harness where the
 // encoder and the browser share a host. Exit status 1 if the median measured
 // latency exceeds --max-latency (default: no limit), 2 on failure to play.
-import { chromium } from 'playwright-core';
+import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+
+// playwright-core from the usual places: next to this file, $NODE_PATH (ESM
+// ignores it, CommonJS require honours it), or $PLAYWRIGHT_CORE.
+const require = createRequire(import.meta.url);
+function loadPlaywright() {
+  for (const c of [process.env.PLAYWRIGHT_CORE, 'playwright-core']) {
+    if (!c) continue;
+    try { return require(c); } catch (e) { if (e.code !== 'MODULE_NOT_FOUND') throw e; }
+  }
+  console.error('playwright-core not found: npm install playwright-core, or set NODE_PATH / PLAYWRIGHT_CORE');
+  process.exit(2);
+}
+const { chromium } = loadPlaywright();
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -31,7 +44,8 @@ for (let i = 0; i < args.length; i++) { if (args[i].startsWith('--')) i++; else 
 const samples = Number(opt('--samples', 5));
 const maxLatency = opt('--max-latency', null) === null ? null : Number(opt('--max-latency'));
 const sourceTz = opt('--source-tz', Intl.DateTimeFormat().resolvedOptions().timeZone);
-const videoSel = opt('--video', 'video.video-js');
+// video.js wraps <video> in a div.video-js that carries the id and .player.
+const videoSel = opt('--video', '.video-js');
 const jsonOut = opt('--json', null);
 const playTimeout = Number(opt('--play-timeout', 90));
 if (!url) { console.error('usage: measure-latency.mjs URL [options]'); process.exit(2); }
