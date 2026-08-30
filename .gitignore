@@ -1,2 +1,4 @@
 *.deb
 dist/
+.worktrees/
+__pycache__/
