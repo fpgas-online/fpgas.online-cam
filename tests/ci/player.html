@@ -10,6 +10,6 @@
 <video id="tt-video" class="video-js" width="640" height="360" controls autoplay muted playsinline preload="auto"></video>
 <script>
   const src = new URLSearchParams(location.search).get('src') || '/live/test.m3u8';
-  videojs('tt-video', {}, function () { this.src({ src, type: 'application/x-mpegURL' }); });
+  videojs('tt-video', { liveui: true }, function () { this.src({ src, type: 'application/x-mpegURL' }); });
 </script>
 </body></html>
