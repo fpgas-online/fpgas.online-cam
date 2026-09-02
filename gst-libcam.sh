@@ -45,7 +45,11 @@ if (gst-inspect-1.0 --exists v4l2h264enc); then
     # h264_i_frame_period: the bcm2835 codec defaults to 60 frames.
     venc="v4l2h264enc extra-controls=controls,video_bitrate_mode=0,video_bitrate=1000000,repeat_sequence_header=1,h264_i_frame_period=${GOP}"
 else
-    venc="x264enc bitrate=2000 byte-stream=false key-int-max=${GOP} bframes=0 aud=true tune=zerolatency"
+    # speed-preset: gst's default is "medium", measured at ~1.3 cores for
+    # 6 fps of 1280x1080 on a Pi 5 (which has no hardware H.264 encoder).
+    # superfast is several times cheaper; the bitrate cost is irrelevant
+    # for our static scenes (blinking LEDs).
+    venc="x264enc bitrate=2000 byte-stream=false key-int-max=${GOP} bframes=0 aud=true tune=zerolatency speed-preset=superfast"
 fi
 
 # example of using encode bin to select encoder
