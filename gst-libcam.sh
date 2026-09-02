@@ -15,6 +15,8 @@
 #   RTMP_DEST  rtmp:// URL to publish to (default: rtmp://<gateway>/pib/<host>)
 #   FPS        capture frame rate (default: 6)
 #   GOP        keyframe interval in frames (default: FPS, i.e. 1 s)
+#   WIDTH      capture width  (default: camera's choice; 640 on the
+#   HEIGHT     capture height  software-encode path, see below)
 FPS=${FPS:-6}
 GOP=${GOP:-${FPS}}
 CAM_SRC=${CAM_SRC:-libcamerasrc}
@@ -50,6 +52,22 @@ else
     # superfast is several times cheaper; the bitrate cost is irrelevant
     # for our static scenes (blinking LEDs).
     venc="x264enc bitrate=2000 byte-stream=false key-int-max=${GOP} bframes=0 aud=true tune=zerolatency speed-preset=superfast"
+    # x264 cost scales with pixel count. Half of each dimension of the
+    # 1280x1080 the camera negotiates by default is a ~4x saving with the
+    # same field of view and aspect (the libcamera ISP scales before the
+    # encoder). Only when capturing from the real camera: a test CAM_SRC
+    # (tests/ci) pins its own size and a second capsfilter would fail
+    # caps negotiation rather than scale.
+    if [ "${CAM_SRC}" = "libcamerasrc" ]; then
+        WIDTH=${WIDTH:-640}
+        HEIGHT=${HEIGHT:-540}
+    fi
+fi
+
+# Optional size constraint (see WIDTH/HEIGHT above).
+SIZE_CAPS=""
+if [ -n "${WIDTH:-}" ]; then
+    SIZE_CAPS="width=${WIDTH},height=${HEIGHT},"
 fi
 
 # example of using encode bin to select encoder
@@ -59,7 +77,7 @@ fi
 # ${CAM_SRC} and ${venc} are deliberately unquoted: they are pipeline fragments.
 # shellcheck disable=SC2086
 /usr/bin/gst-launch-1.0 ${CAM_SRC} ! \
-    video/x-raw,colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
+    video/x-raw,${SIZE_CAPS}colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
     clockoverlay shaded-background=true !\
     ${venc} !\
     video/x-h264,profile=high,level=\(string\)4.2 ! \
