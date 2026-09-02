@@ -15,6 +15,8 @@
 #   RTMP_DEST  rtmp:// URL to publish to (default: rtmp://<gateway>/pib/<host>)
 #   FPS        capture frame rate (default: 6)
 #   GOP        keyframe interval in frames (default: FPS, i.e. 1 s)
+#   WIDTH      capture width  (default: camera's choice; 640 on the
+#   HEIGHT     capture height  software-encode path, see below)
 FPS=${FPS:-6}
 GOP=${GOP:-${FPS}}
 CAM_SRC=${CAM_SRC:-libcamerasrc}
@@ -45,7 +47,27 @@ if (gst-inspect-1.0 --exists v4l2h264enc); then
     # h264_i_frame_period: the bcm2835 codec defaults to 60 frames.
     venc="v4l2h264enc extra-controls=controls,video_bitrate_mode=0,video_bitrate=1000000,repeat_sequence_header=1,h264_i_frame_period=${GOP}"
 else
-    venc="x264enc bitrate=2000 byte-stream=false key-int-max=${GOP} bframes=0 aud=true tune=zerolatency"
+    # speed-preset: gst's default is "medium", measured at ~1.3 cores for
+    # 6 fps of 1280x1080 on a Pi 5 (which has no hardware H.264 encoder).
+    # superfast is several times cheaper; the bitrate cost is irrelevant
+    # for our static scenes (blinking LEDs).
+    venc="x264enc bitrate=2000 byte-stream=false key-int-max=${GOP} bframes=0 aud=true tune=zerolatency speed-preset=superfast"
+    # x264 cost scales with pixel count. Half of each dimension of the
+    # 1280x1080 the camera negotiates by default is a ~4x saving with the
+    # same field of view and aspect (the libcamera ISP scales before the
+    # encoder). Only when capturing from the real camera: a test CAM_SRC
+    # (tests/ci) pins its own size and a second capsfilter would fail
+    # caps negotiation rather than scale.
+    if [ "${CAM_SRC}" = "libcamerasrc" ]; then
+        WIDTH=${WIDTH:-640}
+        HEIGHT=${HEIGHT:-540}
+    fi
+fi
+
+# Optional size constraint (see WIDTH/HEIGHT above).
+SIZE_CAPS=""
+if [ -n "${WIDTH:-}" ]; then
+    SIZE_CAPS="width=${WIDTH},height=${HEIGHT},"
 fi
 
 # example of using encode bin to select encoder
@@ -55,7 +77,7 @@ fi
 # ${CAM_SRC} and ${venc} are deliberately unquoted: they are pipeline fragments.
 # shellcheck disable=SC2086
 /usr/bin/gst-launch-1.0 ${CAM_SRC} ! \
-    video/x-raw,colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
+    video/x-raw,${SIZE_CAPS}colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
     clockoverlay shaded-background=true !\
     ${venc} !\
     video/x-h264,profile=high,level=\(string\)4.2 ! \
