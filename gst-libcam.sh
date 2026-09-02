@@ -17,6 +17,8 @@
 #   GOP        keyframe interval in frames (default: FPS, i.e. 1 s)
 #   WIDTH      capture width  (default: camera's choice; 640 on the
 #   HEIGHT     capture height  software-encode path, see below)
+#   RTSP_DEST  rtsp:// URL for the WebRTC leg (default: mediamtx on the
+#              gateway, rtsp://<gateway>:8554/cam/<host>; empty disables)
 FPS=${FPS:-6}
 GOP=${GOP:-${FPS}}
 CAM_SRC=${CAM_SRC:-libcamerasrc}
@@ -40,6 +42,36 @@ if [ -z "${RTMP_DEST:-}" ]; then
     # done
 
     RTMP_DEST=rtmp://${ip}/pib/${hn}
+fi
+
+# Second leg: publish the same encoded stream to mediamtx over RTSP for
+# WebRTC/WHEP delivery (fpgas.online-infra roles/cam/webrtc). RTMP relay
+# between nginx-rtmp and mediamtx is broken in BOTH directions (gortmplib
+# handshake/parse errors, tested 2026-09-02 against mediamtx v1.20.1), so
+# the Pi tees the one encode into both servers itself.
+if [ -z "${RTSP_DEST+x}" ]; then
+    hn=${hn:-$(/usr/bin/hostname --short)}
+    ip=${ip:-$(ip -json route show default | jq ".[0].gateway" --raw-output)}
+    RTSP_DEST=rtsp://${ip}:8554/cam/${hn}
+fi
+
+# The whole pipeline dies (and systemd restarts it, taking the HLS feed
+# down with it) if rtspclientsink cannot connect, so only add the RTSP
+# branch when something is listening -- an undeployed or briefly down
+# mediamtx must not flap the RTMP leg. If mediamtx comes back later the
+# leg reappears on the next service restart.
+RTSP_BRANCH=""
+if [ -n "${RTSP_DEST}" ]; then
+    hostport=${RTSP_DEST#rtsp://}
+    hostport=${hostport%%/*}
+    rtsp_host=${hostport%%:*}
+    rtsp_port=${hostport##*:}
+    if [ "${rtsp_port}" = "${hostport}" ]; then rtsp_port=554; fi
+    if timeout 2 bash -c "true > /dev/tcp/${rtsp_host}/${rtsp_port}"; then
+        RTSP_BRANCH="t. ! queue ! rtspclientsink location=${RTSP_DEST} protocols=tcp latency=0"
+    else
+        echo "RTSP probe ${rtsp_host}:${rtsp_port} failed; publishing RTMP only" >&2
+    fi
 fi
 
 # figure out if we can use v4l2 hardware encoding (pi 5 says No.)
@@ -74,7 +106,8 @@ fi
 # gst-launch-1.0 videotestsrc ! video/x-raw,width=640,height=480 ! queue ! \
 #   encodebin ! h264parse ! qtmux ! filesink location=output.mp4
 
-# ${CAM_SRC} and ${venc} are deliberately unquoted: they are pipeline fragments.
+# ${CAM_SRC}, ${venc} and ${RTSP_BRANCH} are deliberately unquoted: they are
+# pipeline fragments.
 # shellcheck disable=SC2086
 /usr/bin/gst-launch-1.0 ${CAM_SRC} ! \
     video/x-raw,${SIZE_CAPS}colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
@@ -82,5 +115,7 @@ fi
     ${venc} !\
     video/x-h264,profile=high,level=\(string\)4.2 ! \
     h264parse ! \
-    queue ! flvmux ! \
-    rtmpsink location="${RTMP_DEST}"
+    tee name=t \
+    t. ! queue ! flvmux ! \
+    rtmpsink location="${RTMP_DEST}" \
+    ${RTSP_BRANCH}
