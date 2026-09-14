@@ -52,11 +52,14 @@ fi
 # gst-launch-1.0 videotestsrc ! video/x-raw,width=640,height=480 ! queue ! \
 #   encodebin ! h264parse ! qtmux ! filesink location=output.mp4
 
+# clockoverlay shading subtracts shading-value from the luma under the clock,
+# so the default 80 leaves a light box on bright scenes (white bench, magenta
+# PCB) and OCR fails; 200 keeps the white digits at >= 11.9:1 even on white (#9).
 # ${CAM_SRC} and ${venc} are deliberately unquoted: they are pipeline fragments.
 # shellcheck disable=SC2086
 /usr/bin/gst-launch-1.0 ${CAM_SRC} ! \
     video/x-raw,colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
-    clockoverlay shaded-background=true !\
+    clockoverlay shaded-background=true shading-value=200 !\
     ${venc} !\
     video/x-h264,profile=high,level=\(string\)4.2 ! \
     h264parse ! \
