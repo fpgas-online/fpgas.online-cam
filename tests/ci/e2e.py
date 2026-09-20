@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end latency test: gst-libcam.sh -> nginx-rtmp (HLS) -> video.js in Chromium.
+"""End-to-end latency test: gst-libcam.sh -> nginx-rtmp (HLS) -> video.js in Chrome.
 
 Runs the repo's real publisher script (gst-libcam.sh, with CAM_SRC pointed at
 videotestsrc and RTMP_DEST at a local nginx-rtmp), waits for the HLS playlist,

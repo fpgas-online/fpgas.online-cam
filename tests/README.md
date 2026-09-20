@@ -13,7 +13,7 @@ Pi's wall clock (`clockoverlay`), which is what these tests read back.
 mirrors the infra repo's `pib.conf.j2` / `live-hls.conf.j2` -- keep them in
 step), runs the real `gst-libcam.sh` with `CAM_SRC=videotestsrc` and
 `RTMP_DEST=rtmp://127.0.0.1:11935/pib/test`, opens `tests/ci/player.html`
-(the site's video.js 8.4.0) in Debian's chromium and fails if the median
+(the site's video.js 8.4.0) in real Google Chrome and fails if the median
 measured latency exceeds `--max-latency` (8 s; it measures ~4.5 s, and 32 s
 with the old 60-frame GOP via `--gop 60`).
 
@@ -29,13 +29,17 @@ Locally, with docker:
 (Add `--network host` to both if containers on your machine have no DNS, as
 on ten64.) Everything binds 127.0.0.1:18080 (http) and :11935 (rtmp).
 
-Playwright's own Chromium has no H.264 and cannot play this stream at all
-(video.js: `MEDIA_ERR_SRC_NOT_SUPPORTED`); the image uses Debian's chromium.
+The image installs Google Chrome stable (Google's deb, amd64 and arm64) and
+the tool logs its version. Do not substitute a Chromium build: Playwright's
+own has no H.264 and cannot play this stream at all (video.js:
+`MEDIA_ERR_SRC_NOT_SUPPORTED`), and a distro chromium is not what viewers
+run.
 
 ## On real hardware
 
 Point the same measurement tool at a live board page from any machine with
-an H.264-capable Chromium and tesseract (or from the docker image):
+Google Chrome and tesseract (`CHROME=/path/to/chrome` if it is not
+`/usr/bin/google-chrome`), or from the docker image:
 
     node tests/measure-latency.mjs https://tinytapeout.fpgas.online/board/tt04/ \
         --samples 5 --source-tz Europe/London

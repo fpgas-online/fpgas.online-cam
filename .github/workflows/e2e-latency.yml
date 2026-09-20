@@ -3,8 +3,8 @@ name: E2E latency
 # Glass-to-glass latency of the real pipeline, both legs: gst-libcam.sh
 # (videotestsrc in place of the camera) -> nginx-rtmp, then HLS -> video.js
 # AND mediamtx pulling that stream on demand -> WHEP (configs mirroring the
-# production stream server and cam/webrtc roles), measured in an
-# H.264-capable Chromium by OCR'ing the clockoverlay out of the displayed
+# production stream server and cam/webrtc roles), measured in real
+# Google Chrome by OCR'ing the clockoverlay out of the displayed
 # frames. See tests/README.md.
 on:
   push:
