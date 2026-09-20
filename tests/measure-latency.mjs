@@ -7,9 +7,10 @@
 // compares it with the wall clock. Also reports the structural latency video.js
 // can see on its own: how far behind the newest *listed* HLS fragment it plays.
 //
-// Needs an H.264-capable browser: Playwright's bundled Chromium has no H.264
-// (video.js reports MEDIA_ERR_SRC_NOT_SUPPORTED), so we drive a system
-// Chrome/Chromium ($CHROMIUM, default /usr/bin/chromium) and tesseract-ocr.
+// Drives real Google Chrome ($CHROME, default /usr/bin/google-chrome), the
+// browser viewers use - not a Chromium build: Playwright's bundled Chromium
+// has no H.264 (video.js reports MEDIA_ERR_SRC_NOT_SUPPORTED) and a distro
+// chromium is a different codec/WebRTC configuration. Needs tesseract-ocr.
 //
 //   node tests/measure-latency.mjs URL [--samples N] [--max-latency S]
 //        [--source-tz Europe/London] [--video '#tt-video'] [--json out.json]
@@ -70,9 +71,11 @@ function ocrClock(png) {
 }
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true,
+  executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: true,
   args: ['--autoplay-policy=no-user-gesture-required', '--no-sandbox'],
 });
+// Name the browser in the evidence: a latency figure means nothing without it.
+log('browser:', browser.version(), '(' + (process.env.CHROME || '/usr/bin/google-chrome') + ')');
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 page.on('console', (m) => { if (m.type() === 'error') log('browser console:', m.text()); });
 await page.goto(url, { waitUntil: 'load' });
