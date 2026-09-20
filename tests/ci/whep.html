@@ -29,7 +29,13 @@
             ? Math.round(1000 * s.jitterBufferTargetDelay / s.jitterBufferEmittedCount) : null,
         });
       }
-      if (s.type === 'candidate-pair' && s.nominated) out.rtt_ms = Math.round(1000 * (s.currentRoundTripTime || 0));
+      if (s.type === 'candidate-pair' && s.nominated) {
+        out.rtt_ms = Math.round(1000 * (s.currentRoundTripTime || 0));
+        // which path ICE chose: the server address tells IPv4-via-DNAT from direct IPv6
+        const r = stats.get(s.remoteCandidateId), l = stats.get(s.localCandidateId);
+        if (r) out.server = `${r.protocol} ${r.address}:${r.port}`;
+        if (l) out.local = `${l.candidateType} ${l.protocol}`;
+      }
     });
     return out;
   };

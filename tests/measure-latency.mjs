@@ -15,6 +15,8 @@
 //   node tests/measure-latency.mjs URL [--samples N] [--max-latency S]
 //        [--source-tz Europe/London] [--video '#tt-video'] [--json out.json]
 //
+// HEADED=1 in the environment opens a real window (use xvfb-run on a server).
+//
 // --source-tz is the timezone of the clock in the picture (the Pi's local
 // zone); default is this machine's zone, right for the CI harness where the
 // encoder and the browser share a host. Exit status 1 if the median measured
@@ -75,11 +77,14 @@ function ocrClock(png) {
 }
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: true,
+  executablePath: process.env.CHROME || '/usr/bin/google-chrome',
+  // HEADED=1: a real window (run under xvfb-run on a server). Headless Chrome
+  // composites video differently, so headed is the closer match to a viewer.
+  headless: !process.env.HEADED,
   args: ['--autoplay-policy=no-user-gesture-required', '--no-sandbox'],
 });
 // Name the browser in the evidence: a latency figure means nothing without it.
-log('browser:', browser.version(), '(' + (process.env.CHROME || '/usr/bin/google-chrome') + ')');
+log('browser:', browser.version(), '(' + (process.env.CHROME || '/usr/bin/google-chrome') + ')', process.env.HEADED ? 'headed' : 'headless');
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 page.on('console', (m) => { if (m.type() === 'error') log('browser console:', m.text()); });
 await page.goto(url, { waitUntil: 'load' });
