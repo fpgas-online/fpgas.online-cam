@@ -145,11 +145,14 @@ for (let i = 0; i < samples; i++) {
   log(JSON.stringify(r));
   await page.waitForTimeout(2000);
 }
+// WebRTC pages may expose Chrome's own receive-side numbers (tests/ci/whep.html).
+const webrtc = await page.evaluate(() => (window.whepStats ? window.whepStats() : null));
+if (webrtc) log('webrtc stats:', JSON.stringify(webrtc));
 await browser.close();
 
 const good = results.map((r) => r.latency_s).filter((x) => x !== null).sort((a, b) => a - b);
 const median = good.length ? good[Math.floor(good.length / 2)] : null;
-const summary = { url, sourceTz, samples: results.length, ocr_ok: good.length, median_latency_s: median, min_latency_s: good[0] ?? null, max_latency_s: good[good.length - 1] ?? null, targetDuration: state.targetDuration, results };
+const summary = { url, sourceTz, samples: results.length, ocr_ok: good.length, median_latency_s: median, min_latency_s: good[0] ?? null, max_latency_s: good[good.length - 1] ?? null, targetDuration: state.targetDuration, webrtc, results };
 console.log(JSON.stringify(summary, null, 2));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(summary, null, 2));
 if (good.length < Math.ceil(results.length / 2)) { log('OCR failed on most samples; crops kept in', workdir); process.exit(2); }

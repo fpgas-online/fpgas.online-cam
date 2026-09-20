@@ -4,6 +4,36 @@
      ?whep=<absolute WHEP URL>. The measurement tool treats a plain <video>
      (no video.js) as the thing to OCR. -->
 <html><head><meta charset="utf-8"><title>whep latency test player</title>
+<script>
+  // reader.js keeps its RTCPeerConnection private; note each one as it is
+  // built so window.whepStats() can ask Chrome what it negotiated and how
+  // long its jitter buffer holds a frame (the receive-side share of latency).
+  const pcs = [];
+  window.RTCPeerConnection = new Proxy(window.RTCPeerConnection, {
+    construct(target, args) { const pc = new target(...args); pcs.push(pc); return pc; },
+  });
+  window.whepStats = async () => {
+    const pc = pcs.filter((p) => p.connectionState === 'connected').pop();
+    if (!pc) return null;
+    const stats = await pc.getStats(); const out = {};
+    stats.forEach((s) => {
+      if (s.type === 'inbound-rtp' && s.kind === 'video') {
+        const codec = stats.get(s.codecId);
+        Object.assign(out, {
+          codec: codec && codec.mimeType, fmtp: codec && codec.sdpFmtpLine,
+          framesDecoded: s.framesDecoded, framesDropped: s.framesDropped, fps: s.framesPerSecond,
+          decoder: s.decoderImplementation,
+          jitter_buffer_ms_per_frame: s.jitterBufferEmittedCount
+            ? Math.round(1000 * s.jitterBufferDelay / s.jitterBufferEmittedCount) : null,
+          jitter_buffer_target_ms_per_frame: s.jitterBufferEmittedCount
+            ? Math.round(1000 * s.jitterBufferTargetDelay / s.jitterBufferEmittedCount) : null,
+        });
+      }
+      if (s.type === 'candidate-pair' && s.nominated) out.rtt_ms = Math.round(1000 * (s.currentRoundTripTime || 0));
+    });
+    return out;
+  };
+</script>
 <script src="/mediamtx-reader.js"></script>
 </head><body>
 <video id="live" width="640" height="360" autoplay muted playsinline></video>
