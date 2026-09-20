@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- Minimal stand-in for the site's WHEP live view (fpgas.online-site
+     whep-live.js): a bare <video> fed by mediamtx's reader.js, pointed at
+     ?whep=<absolute WHEP URL>. The measurement tool treats a plain <video>
+     (no video.js) as the thing to OCR. -->
+<html><head><meta charset="utf-8"><title>whep latency test player</title>
+<script src="/mediamtx-reader.js"></script>
+</head><body>
+<video id="live" width="640" height="360" autoplay muted playsinline></video>
+<script>
+  const whep = new URLSearchParams(location.search).get('whep');
+  const reader = new MediaMTXWebRTCReader({
+    url: whep,
+    onError: (err) => console.error('whep:', err),
+    onTrack: (evt) => {
+      try { evt.receiver.jitterBufferTarget = 50; } catch (e) {}
+      document.getElementById('live').srcObject = evt.streams[0];
+    },
+  });
+</script>
+</body></html>
