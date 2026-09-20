@@ -18,6 +18,10 @@
 // zone); default is this machine's zone, right for the CI harness where the
 // encoder and the browser share a host. Exit status 1 if the median measured
 // latency exceeds --max-latency (default: no limit), 2 on failure to play.
+//
+// Works against video.js (the site's HLS player) or, when the selected
+// element is a plain <video> with no video.js instance (the WHEP live view),
+// against the element directly - playlist/VHS metrics are skipped there.
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -82,10 +86,15 @@ log('H.264 via MSE supported:', support);
 // The site's video.js instance: <video class="video-js"> gets a .player property.
 const probe = () => page.evaluate((sel) => {
   const v = document.querySelector(sel); const p = v && v.player;
-  if (!p) return { err: 'no video.js player on ' + sel };
-  const el = p.tech_ && p.tech_.el_;
-  const out = { now: Date.now(), paused: p.paused(), readyState: p.readyState(), currentTime: p.currentTime(), w: el && el.videoWidth, h: el && el.videoHeight };
+  if (!v) return { err: 'no element matches ' + sel };
+  if (!p && !(v instanceof HTMLVideoElement)) return { err: 'no video.js player on ' + sel };
+  // plain <video> (WHEP live view): measure the element itself
+  const el = p ? (p.tech_ && p.tech_.el_) : v;
+  const out = p
+    ? { now: Date.now(), paused: p.paused(), readyState: p.readyState(), currentTime: p.currentTime(), w: el && el.videoWidth, h: el && el.videoHeight }
+    : { now: Date.now(), paused: v.paused, readyState: v.readyState, currentTime: v.currentTime, w: v.videoWidth, h: v.videoHeight, plain: true };
   try { const q = el.getVideoPlaybackQuality(); out.frames = q.totalVideoFrames; out.dropped = q.droppedVideoFrames; } catch (e) { }
+  if (!p) return out;
   try {
     const pl = p.tech_.vhs.playlists.media();
     out.targetDuration = pl.targetDuration; out.mediaSequence = pl.mediaSequence; out.nSegs = pl.segments.length;
@@ -111,7 +120,8 @@ const results = [];
 for (let i = 0; i < samples; i++) {
   // Grab the clock region of the *displayed* frame, upscaled 3x for tesseract.
   const shot = await page.evaluate((sel) => {
-    const v = document.querySelector(sel).player.tech_.el_;
+    const q = document.querySelector(sel);
+    const v = q.player ? q.player.tech_.el_ : q;
     const sw = Math.round(v.videoWidth * 0.3), sh = Math.round(v.videoHeight * 0.12);
     const c = document.createElement('canvas'); c.width = sw * 3; c.height = sh * 3;
     c.getContext('2d').drawImage(v, 0, 0, sw, sh, 0, 0, c.width, c.height);
