@@ -59,3 +59,26 @@ segment on a Pi and compare its clock with the segment name:
     curl --resolve tinytapeout.fpgas.online:443:10.21.0.1 -O https://tinytapeout.fpgas.online/live/<newest>.ts
     gst-launch-1.0 filesrc location=<newest>.ts ! tsdemux ! h264parse ! openh264dec \
         ! videoconvert ! video/x-raw,format=RGB ! pngenc snapshot=true ! filesink location=frame0.png
+
+
+## WHEP (WebRTC) leg
+
+`tests/ci/e2e.py` also runs mediamtx (same version as the infra
+`cam/webrtc` role; `tests/ci/mediamtx.yml` mirrors its config). The camera
+script is untouched: mediamtx pulls `rtmp://.../pib/test` from nginx-rtmp
+**on demand**, only while a WHEP viewer is watching `cam/test`. The test
+asserts mediamtx holds no path while only the HLS leg runs, then measures
+the WHEP path with the same clockoverlay OCR through `tests/ci/whep.html`
+(a bare `<video>` fed by mediamtx's `reader.js`, fetched into the docker
+image at build time) and checks the log shows the on-demand pull starting.
+The median must stay under `--whep-max-latency` (default 2 s). `--no-whep`
+skips all of it, e.g. for the `--gop 60` regression demonstration.
+
+The pull only works because the nginx-rtmp application does **not** set
+`wait_video on;` (see the comment in `tests/ci/nginx.conf`): put it back
+and mediamtx logs `[RTMP source] not enough bytes` and the WHEP leg times
+out. That is the regression this leg guards.
+
+On a live board page the equivalent measurement is the WHEP view on the
+page itself (fpgas.online-site `whep-live.js`); pass `--video video` (the
+bare element) instead of the default video.js selector.
