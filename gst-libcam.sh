@@ -11,13 +11,55 @@
 #
 # Overridable from the environment so tests/ci can run this exact script
 # against a synthetic source and a local nginx-rtmp:
-#   CAM_SRC    GStreamer source element/bin (default: libcamerasrc)
+#   CAM_SRC    GStreamer source element/bin (default: detected, see below)
 #   RTMP_DEST  rtmp:// URL to publish to (default: rtmp://<gateway>/pib/<host>)
 #   FPS        capture frame rate (default: 6)
 #   GOP        keyframe interval in frames (default: FPS, i.e. 1 s)
 FPS=${FPS:-6}
 GOP=${GOP:-${FPS}}
-CAM_SRC=${CAM_SRC:-libcamerasrc}
+GST_LAUNCH=${GST_LAUNCH:-/usr/bin/gst-launch-1.0}
+
+# Capture source, when CAM_SRC is not given:
+#   1. a CSI camera: the firmware found a sensor at boot and the kernel bound
+#      it, e.g. v4l-subdev "ov5647 10-0036" (<driver> <i2c bus>-<addr>), on
+#      Pi 3/4 (unicam) and Pi 5 (rp1-cfe) alike;
+#   2. else a USB (UVC) capture device, e.g. the HDMI grabbers on the NeTV2
+#      boards, as raw YUY2 1280x720 (10 fps on the MS2109): no MJPEG decode;
+#   3. else no camera. CSI cameras can only be connected with the board off,
+#      and USB ones are enumerated long before this runs, so after
+#      CAM_WAIT_TRIES checks exit 78, which cam.service does not restart:
+#      a board without a camera stops here instead of looping for ever.
+V4L_SYSFS=${V4L_SYSFS:-/sys/class/video4linux}
+V4L_BYID=${V4L_BYID:-/dev/v4l/by-id}
+CAM_WAIT_TRIES=${CAM_WAIT_TRIES:-10}
+CAM_WAIT_SECS=${CAM_WAIT_SECS:-3}
+
+find_camera() {
+    if grep -qsE ' [0-9]+-00[0-9a-f]{2}$' "${V4L_SYSFS}"/v4l-subdev*/name; then
+        CAM_SRC=libcamerasrc
+        return 0
+    fi
+    for dev in "${V4L_BYID}"/usb-*-video-index0; do
+        [ -e "${dev}" ] || continue
+        CAM_SRC="v4l2src device=${dev} ! video/x-raw,format=YUY2,width=1280,height=720 ! videorate ! videoconvert"
+        return 0
+    done
+    return 1
+}
+
+if [ -z "${CAM_SRC:-}" ]; then
+    try=1
+    until find_camera; do
+        echo "no camera found (try ${try}/${CAM_WAIT_TRIES})" >&2
+        if [ "${try}" -ge "${CAM_WAIT_TRIES}" ]; then
+            echo "no CSI sensor or USB capture device: giving up (exit 78, not restarted)." >&2
+            echo "A CSI camera needs a power cycle; after plugging in USB: systemctl restart fpgas-cam" >&2
+            exit 78
+        fi
+        try=$((try + 1))
+        sleep "${CAM_WAIT_SECS}"
+    done
+fi
 
 if [ -z "${RTMP_DEST:-}" ]; then
     # hostname
@@ -57,7 +99,7 @@ fi
 # PCB) and OCR fails; 200 keeps the white digits at >= 11.9:1 even on white (#9).
 # ${CAM_SRC} and ${venc} are deliberately unquoted: they are pipeline fragments.
 # shellcheck disable=SC2086
-/usr/bin/gst-launch-1.0 ${CAM_SRC} ! \
+${GST_LAUNCH} ${CAM_SRC} ! \
     video/x-raw,colorimetry=bt709,format=NV12,interlace-mode=progressive,framerate=${FPS}/1 ! \
     clockoverlay shaded-background=true shading-value=200 !\
     ${venc} !\
