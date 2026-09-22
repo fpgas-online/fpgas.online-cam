@@ -13,3 +13,7 @@ StartLimitInterval=0
 ExecStart=/usr/local/bin/fpgas-gst-libcam.sh
 Restart=always
 RestartSec=1
+# 78 = gst-libcam.sh found no camera. Stay stopped: a CSI camera can only be
+# connected with the board off; other failures (e.g. the stream server
+# restarting) keep retrying.
+RestartPreventExitStatus=78
