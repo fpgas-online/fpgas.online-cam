@@ -1,0 +1,29 @@
+# mediamtx for the end-to-end WHEP latency test. Mirrors the production
+# server (fpgas.online-infra roles/cam/webrtc templates/mediamtx.yml.j2):
+# no ingest listener at all - each camera is PULLED over RTMP from
+# nginx-rtmp while somebody watches it - and WHEP out. Keep the deltas in
+# step. Test ports are the production ones + 10000, all on localhost.
+logLevel: info
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+moq: no
+playback: no
+webrtc: yes
+webrtcAddress: 127.0.0.1:18889
+webrtcLocalUDPAddress: :18189
+webrtcLocalTCPAddress: :18189
+# In CI browser and server share a host/netns; interface IPs are the
+# usable candidates (prod advertises webrtcAdditionalHosts instead).
+webrtcIPsFromInterfaces: yes
+api: yes
+apiAddress: 127.0.0.1:19997
+paths:
+  # "app#streamKey" is mediamtx's RTMP URL syntax; a plain /pib/<host> would
+  # be sent to nginx as app='pib/<host>'.
+  "~^cam/([A-Za-z0-9][A-Za-z0-9._-]*)$":
+    source: "rtmp://127.0.0.1:11935/pib#$G1"
+    sourceOnDemand: yes
+    sourceOnDemandStartTimeout: 10s
+    sourceOnDemandCloseAfter: 10s

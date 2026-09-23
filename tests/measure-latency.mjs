@@ -7,17 +7,24 @@
 // compares it with the wall clock. Also reports the structural latency video.js
 // can see on its own: how far behind the newest *listed* HLS fragment it plays.
 //
-// Needs an H.264-capable browser: Playwright's bundled Chromium has no H.264
-// (video.js reports MEDIA_ERR_SRC_NOT_SUPPORTED), so we drive a system
-// Chrome/Chromium ($CHROMIUM, default /usr/bin/chromium) and tesseract-ocr.
+// Drives real Google Chrome ($CHROME, default /usr/bin/google-chrome), the
+// browser viewers use - not a Chromium build: Playwright's bundled Chromium
+// has no H.264 (video.js reports MEDIA_ERR_SRC_NOT_SUPPORTED) and a distro
+// chromium is a different codec/WebRTC configuration. Needs tesseract-ocr.
 //
 //   node tests/measure-latency.mjs URL [--samples N] [--max-latency S]
 //        [--source-tz Europe/London] [--video '#tt-video'] [--json out.json]
+//
+// HEADED=1 in the environment opens a real window (use xvfb-run on a server).
 //
 // --source-tz is the timezone of the clock in the picture (the Pi's local
 // zone); default is this machine's zone, right for the CI harness where the
 // encoder and the browser share a host. Exit status 1 if the median measured
 // latency exceeds --max-latency (default: no limit), 2 on failure to play.
+//
+// Works against video.js (the site's HLS player) or, when the selected
+// element is a plain <video> with no video.js instance (the WHEP live view),
+// against the element directly - playlist/VHS metrics are skipped there.
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -70,9 +77,14 @@ function ocrClock(png) {
 }
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM || '/usr/bin/chromium', headless: true,
+  executablePath: process.env.CHROME || '/usr/bin/google-chrome',
+  // HEADED=1: a real window (run under xvfb-run on a server). Headless Chrome
+  // composites video differently, so headed is the closer match to a viewer.
+  headless: !process.env.HEADED,
   args: ['--autoplay-policy=no-user-gesture-required', '--no-sandbox'],
 });
+// Name the browser in the evidence: a latency figure means nothing without it.
+log('browser:', browser.version(), '(' + (process.env.CHROME || '/usr/bin/google-chrome') + ')', process.env.HEADED ? 'headed' : 'headless');
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 page.on('console', (m) => { if (m.type() === 'error') log('browser console:', m.text()); });
 await page.goto(url, { waitUntil: 'load' });
@@ -82,10 +94,15 @@ log('H.264 via MSE supported:', support);
 // The site's video.js instance: <video class="video-js"> gets a .player property.
 const probe = () => page.evaluate((sel) => {
   const v = document.querySelector(sel); const p = v && v.player;
-  if (!p) return { err: 'no video.js player on ' + sel };
-  const el = p.tech_ && p.tech_.el_;
-  const out = { now: Date.now(), paused: p.paused(), readyState: p.readyState(), currentTime: p.currentTime(), w: el && el.videoWidth, h: el && el.videoHeight };
+  if (!v) return { err: 'no element matches ' + sel };
+  if (!p && !(v instanceof HTMLVideoElement)) return { err: 'no video.js player on ' + sel };
+  // plain <video> (WHEP live view): measure the element itself
+  const el = p ? (p.tech_ && p.tech_.el_) : v;
+  const out = p
+    ? { now: Date.now(), paused: p.paused(), readyState: p.readyState(), currentTime: p.currentTime(), w: el && el.videoWidth, h: el && el.videoHeight }
+    : { now: Date.now(), paused: v.paused, readyState: v.readyState, currentTime: v.currentTime, w: v.videoWidth, h: v.videoHeight, plain: true };
   try { const q = el.getVideoPlaybackQuality(); out.frames = q.totalVideoFrames; out.dropped = q.droppedVideoFrames; } catch (e) { }
+  if (!p) return out;
   try {
     const pl = p.tech_.vhs.playlists.media();
     out.targetDuration = pl.targetDuration; out.mediaSequence = pl.mediaSequence; out.nSegs = pl.segments.length;
@@ -111,7 +128,8 @@ const results = [];
 for (let i = 0; i < samples; i++) {
   // Grab the clock region of the *displayed* frame, upscaled 3x for tesseract.
   const shot = await page.evaluate((sel) => {
-    const v = document.querySelector(sel).player.tech_.el_;
+    const q = document.querySelector(sel);
+    const v = q.player ? q.player.tech_.el_ : q;
     const sw = Math.round(v.videoWidth * 0.3), sh = Math.round(v.videoHeight * 0.12);
     const c = document.createElement('canvas'); c.width = sw * 3; c.height = sh * 3;
     c.getContext('2d').drawImage(v, 0, 0, sw, sh, 0, 0, c.width, c.height);
@@ -132,11 +150,14 @@ for (let i = 0; i < samples; i++) {
   log(JSON.stringify(r));
   await page.waitForTimeout(2000);
 }
+// WebRTC pages may expose Chrome's own receive-side numbers (tests/ci/whep.html).
+const webrtc = await page.evaluate(() => (window.whepStats ? window.whepStats() : null));
+if (webrtc) log('webrtc stats:', JSON.stringify(webrtc));
 await browser.close();
 
 const good = results.map((r) => r.latency_s).filter((x) => x !== null).sort((a, b) => a - b);
 const median = good.length ? good[Math.floor(good.length / 2)] : null;
-const summary = { url, sourceTz, samples: results.length, ocr_ok: good.length, median_latency_s: median, min_latency_s: good[0] ?? null, max_latency_s: good[good.length - 1] ?? null, targetDuration: state.targetDuration, results };
+const summary = { url, sourceTz, samples: results.length, ocr_ok: good.length, median_latency_s: median, min_latency_s: good[0] ?? null, max_latency_s: good[good.length - 1] ?? null, targetDuration: state.targetDuration, webrtc, results };
 console.log(JSON.stringify(summary, null, 2));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify(summary, null, 2));
 if (good.length < Math.ceil(results.length / 2)) { log('OCR failed on most samples; crops kept in', workdir); process.exit(2); }

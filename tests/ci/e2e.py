@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""End-to-end latency test: gst-libcam.sh -> nginx-rtmp (HLS) -> video.js in Chromium.
+"""End-to-end latency test: gst-libcam.sh -> nginx-rtmp (HLS) -> video.js in Chrome.
 
 Runs the repo's real publisher script (gst-libcam.sh, with CAM_SRC pointed at
 videotestsrc and RTMP_DEST at a local nginx-rtmp), waits for the HLS playlist,
 then runs tests/measure-latency.mjs against tests/ci/player.html and fails if
 the median glass-to-glass latency exceeds --max-latency.
+
+Then the WebRTC leg: mediamtx (tests/ci/mediamtx.yml) pulls the same stream
+from nginx-rtmp on demand when tests/ci/whep.html asks for it over WHEP; the
+same measurement must stay under --whep-max-latency. --no-whep skips it.
 
 Everything runs unprivileged from a scratch prefix; nothing is installed.
 Intended to run inside the tests/ci/Dockerfile image (see tests/README.md):
@@ -14,6 +18,7 @@ Intended to run inside the tests/ci/Dockerfile image (see tests/README.md):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import signal
@@ -28,6 +33,10 @@ REPO = Path(__file__).resolve().parents[2]
 CI = REPO / "tests" / "ci"
 HTTP = "http://127.0.0.1:18080"
 RTMP = "rtmp://127.0.0.1:11935/pib/test"
+WHEP = "http://127.0.0.1:18889/cam/test/whep"
+MEDIAMTX_API = "http://127.0.0.1:19997"
+# fetched at image build time (tests/ci/Dockerfile), same mediamtx version
+READER_JS = os.environ.get("MEDIAMTX_READER", "/opt/mediamtx-reader.js")
 
 
 def wait_for(what: str, fn, timeout: float, interval: float = 0.5):
@@ -48,6 +57,11 @@ def http_get(path: str) -> str:
         return r.read().decode()
 
 
+def url_get(url: str) -> str:
+    with urllib.request.urlopen(url, timeout=5) as r:
+        return r.read().decode()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--max-latency", type=float, default=8.0, help="fail if median latency (s) exceeds this")
@@ -55,6 +69,10 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="keep the scratch prefix (logs, HLS files)")
     ap.add_argument("--fps", type=int, default=6, help="FPS passed to gst-libcam.sh")
     ap.add_argument("--gop", type=int, default=None, help="GOP passed to gst-libcam.sh (default: FPS, i.e. 1 s)")
+    ap.add_argument("--whep-max-latency", type=float, default=2.0,
+                    help="fail if median WHEP latency (s) exceeds this")
+    ap.add_argument("--no-whep", action="store_true",
+                    help="skip mediamtx and the WHEP leg (HLS only)")
     args = ap.parse_args()
 
     prefix = Path(tempfile.mkdtemp(prefix="cam-e2e-"))
@@ -65,6 +83,9 @@ def main() -> int:
         (prefix / d).mkdir()
         (prefix / d).chmod(0o777)  # mkdir(mode=) is masked by umask
     shutil.copy(CI / "player.html", prefix / "www" / "player.html")
+    shutil.copy(CI / "whep.html", prefix / "www" / "whep.html")
+    if Path(READER_JS).exists():
+        shutil.copy(READER_JS, prefix / "www" / "mediamtx-reader.js")
     conf = prefix / "nginx.conf"
     conf.write_text((CI / "nginx.conf").read_text().replace("@PREFIX@", str(prefix)))
     print(f"[e2e] prefix {prefix}", flush=True)
@@ -75,6 +96,15 @@ def main() -> int:
                                  stdout=(prefix / "nginx.out").open("w"), stderr=subprocess.STDOUT)
         procs.append(nginx)
         wait_for("nginx http", lambda: http_get("/player.html").startswith("<!DOCTYPE"), 15)
+
+        if not args.no_whep:
+            # The camera script knows nothing about mediamtx: it publishes
+            # RTMP to nginx only, and mediamtx pulls pib/test from there when
+            # (and only while) the WHEP page below is watching cam/test.
+            mm = subprocess.Popen(["mediamtx", str(CI / "mediamtx.yml")],
+                                  stdout=(prefix / "mediamtx.out").open("w"), stderr=subprocess.STDOUT)
+            procs.append(mm)
+            wait_for("mediamtx api", lambda: "itemCount" in url_get(MEDIAMTX_API + "/v3/paths/list"), 15)
 
         env = dict(os.environ,
                    # capsfilter as an element: gst-launch grammar does not allow
@@ -102,9 +132,30 @@ def main() -> int:
                "--json", str(report), "--video", "#tt-video"]
         print("[e2e] " + " ".join(cmd), flush=True)
         rc = subprocess.call(cmd)
+
+        if rc == 0 and not args.no_whep:
+            # On demand means exactly that: the camera has been publishing to
+            # nginx for the whole HLS measurement, and mediamtx must not have
+            # touched it yet.
+            idle = json.loads(url_get(MEDIAMTX_API + "/v3/paths/list"))
+            if idle["itemCount"] != 0:
+                print(f"[e2e] FAILED: mediamtx is pulling with no viewer: {idle['items']}", flush=True)
+                return 1
+            report_whep = prefix / "latency-whep.json"
+            cmd = ["node", str(REPO / "tests" / "measure-latency.mjs"),
+                   f"{HTTP}/whep.html?whep={WHEP}",
+                   "--samples", str(args.samples), "--max-latency", str(args.whep_max_latency),
+                   "--json", str(report_whep), "--video", "#live"]
+            print("[e2e] " + " ".join(cmd), flush=True)
+            rc = subprocess.call(cmd)
+            mmlog = (prefix / "mediamtx.out").read_text()
+            if rc == 0 and "[RTMP source] started on demand" not in mmlog:
+                print("[e2e] FAILED: WHEP played but mediamtx never started an on-demand pull", flush=True)
+                rc = 1
+
         if rc != 0:
             print(f"[e2e] FAILED (measure-latency exit {rc})", flush=True)
-            for f in ("cam.out", "nginx.out", "error.log"):
+            for f in ("cam.out", "nginx.out", "error.log", "mediamtx.out"):
                 p = prefix / f
                 if p.exists():
                     print(f"----- {f} (tail)\n" + "\n".join(p.read_text().splitlines()[-40:]), flush=True)

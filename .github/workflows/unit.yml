@@ -1,0 +1,17 @@
+name: Unit
+
+# gst-libcam.sh capture source selection against a fake sysfs (no GStreamer
+# or hardware needed). See tests/test_source_select.py.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  source-select:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Run tests
+        run: uv run --no-project --with pytest pytest -v tests/test_source_select.py

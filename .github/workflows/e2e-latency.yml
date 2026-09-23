@@ -1,9 +1,11 @@
 name: E2E latency
 
-# Glass-to-glass latency of the real pipeline: gst-libcam.sh (videotestsrc in
-# place of the camera) -> nginx-rtmp HLS (config mirroring the production
-# stream server) -> video.js 8.4.0 in an H.264-capable Chromium, with the
-# clockoverlay OCR'd out of the displayed frames. See tests/README.md.
+# Glass-to-glass latency of the real pipeline, both legs: gst-libcam.sh
+# (videotestsrc in place of the camera) -> nginx-rtmp, then HLS -> video.js
+# AND mediamtx pulling that stream on demand -> WHEP (configs mirroring the
+# production stream server and cam/webrtc roles), measured in real
+# Google Chrome by OCR'ing the clockoverlay out of the displayed
+# frames. See tests/README.md.
 on:
   push:
     branches: [main]
@@ -21,4 +23,5 @@ jobs:
       - name: Run end-to-end latency test
         run: |
           docker run --rm -v "$PWD:/src:ro" fpgas-cam-e2e \
-            uv run --no-project tests/ci/e2e.py --samples 5 --max-latency 8
+            uv run --no-project tests/ci/e2e.py --samples 5 --max-latency 8 \
+              --whep-max-latency 2
