@@ -240,6 +240,7 @@ def test_sensor_that_will_not_bind_does_not_stop_the_receiver_bind(pi, steps):
     with pytest.raises(RuntimeError, match="binding 10-0036"):
         pi.bind_lens(pi.find_camera())
     assert steps[-2:] == SENSOR_THEN_RECEIVER  # the receiver bind was still attempted
+    assert pi.UNBOUND.exists()  # and the next run tries the sensor again
 
 
 def test_failed_sensor_unbind_binds_the_receiver_again(pi, steps):
@@ -488,3 +489,25 @@ def test_recover_alone_binds_and_does_nothing_else(pi, steps, monkeypatch, capsy
     assert steps == SENSOR_THEN_RECEIVER and not pi.UNBOUND.exists()
     assert capsys.readouterr().out == ""
     assert pi.main(["--bogus"]) == 2
+
+
+def test_bind_that_fails_in_recovery_keeps_the_note_for_the_next_run(pi, steps, capsys):
+    pi.lens()
+    note = {"receiver": "1f00110000.csi", "receiver_driver": str(pi.sys_root / "bus/platform/drivers/rp1-cfe"),
+            "sensor": "10-0036", "sensor_driver": str(pi.sys_root / "bus/i2c/drivers/ov5647")}
+    pi.UNBOUND.write_text(json.dumps(note))
+    (pi.sys_root / "bus/platform/drivers/rp1-cfe/1f00110000.csi").rmdir()
+    (pi.sys_root / "bus/i2c/drivers/ov5647/10-0036").rmdir()
+    steps.write.fail = "ov5647/bind"
+    assert pi.main(["--recover"]) == 0
+    assert steps == SENSOR_THEN_RECEIVER and pi.UNBOUND.exists()  # receiver bound, sensor not: try again later
+    steps.write.fail = None
+    del steps[:]
+    assert pi.main(["--recover"]) == 0
+    assert steps == ["ov5647/bind 10-0036"] and not pi.UNBOUND.exists()
+
+
+def test_probe_unanswered_reads_must_be_in_a_row(probe, pi):
+    e = probe.errno
+    with pytest.raises(pi.ProbeError):
+        probe(frames=5, reads=(e.EREMOTEIO, e.EREMOTEIO, e.EREMOTEIO, e.EIO))

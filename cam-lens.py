@@ -245,7 +245,7 @@ def lens_answers(camera):
                 answered = True
             except OSError as e:
                 if e.errno not in NOBODY_THERE:
-                    bus_error = e
+                    bus_error, silences = e, 0  # the unanswered reads have to be in a row
                 elif frames >= FRAMES_BEFORE_VERDICT:  # before that: not powered yet, or nothing there
                     silences += 1
             if silences >= SILENCES_BEFORE_VERDICT or capture.poll() is not None:
@@ -314,10 +314,14 @@ def recover():
         errors = rebind(note)
     except (ValueError, KeyError, TypeError) as e:
         # The note is written whole or not at all, so this is not ours; it must not stop every later run.
-        errors = [f"{UNBOUND} is not a note of what was unbound ({e!r}): removed, nothing bound"]
-    UNBOUND.unlink(missing_ok=True)
+        log(f"{UNBOUND} is not a note of what was unbound ({e!r}): removed, nothing bound")
+        errors = []
     for e in errors:
         log(e)
+    if errors:
+        log(f"keeping {UNBOUND}: the next run tries again")
+    else:
+        UNBOUND.unlink(missing_ok=True)
     time.sleep(1)  # let the sensor register before find_camera looks for it
 
 
@@ -345,7 +349,8 @@ def bind_lens(camera):
         finally:
             # Bind again whatever happened: a board with the stock tree and a camera beats one with no camera.
             errors = rebind(note)
-            UNBOUND.unlink(missing_ok=True)
+            if not errors:  # a bind that failed is tried again by the next run's recover()
+                UNBOUND.unlink(missing_ok=True)
         if errors:
             raise RuntimeError("; ".join(errors))
     finally:
