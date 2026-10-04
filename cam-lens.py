@@ -3,7 +3,7 @@
 
 Run as root by fpgas-gst-libcam.sh before it starts the pipeline. Every Pi runs the same image and the same
 config.txt, and a camera can be swapped between boots, so what the camera is has to be found out here, on the
-Pi, every time (fpgas-online/fpgas.online-infra issue #177).
+Pi, in every boot (fpgas-online/fpgas.online-infra issue #177).
 
 The firmware's camera auto-detect loads the plain sensor overlay. For the OV5647 that overlay already describes a
 lens motor beside the sensor, as a *disabled* `ad5398@c` node: the overlay's `vcm` parameter does nothing but
@@ -12,18 +12,24 @@ fixed-focus OV5647 modules are in the same fleet. So:
 
   1. Find the bound sensor and a disabled lens node next to it in the device tree. None: nothing to do.
   2. Ask the lens chip itself. It only answers while the camera is powered, so run a short capture and read
-     its I2C address meanwhile. No answer: a fixed-focus module, nothing to do.
+     its I2C address meanwhile. No answer from a camera that is streaming: a fixed-focus module, nothing to do.
+     The answer holds for this boot (a CSI camera cannot be changed with the power on) and is remembered in
+     /run, so later starts of the stream do not probe again.
   3. Unbind the camera receiver and the sensor, apply a runtime overlay that makes the two changes the `vcm`
      parameter would have made, and bind them again. The receiver has to be unbound too: re-probing the sensor
-     under a live rp1-cfe makes it register its video devices twice and the kernel oopses (measured on a Pi 5,
-     6.12.109+rpt-rpi-v8).
+     under a live rp1-cfe makes it register its video devices twice, the kernel oopses, and the Pi then hangs
+     in shutdown (measured on a Pi 5, 6.12.109+rpt-rpi-v8). Termination signals are held off for the length of
+     this step, what was unbound is written down first, and a run that finds such a note left behind binds the
+     two again before anything else.
   4. Write a libcamera tuning file with an autofocus section (the stock ov5647 tuning has none) and print its
      path. The caller then runs libcamerasrc with that file and af-mode=continuous: libcamera scans for the
      sharpest lens position from the picture when the stream starts.
 
 Output: the tuning file's path on stdout when the lens is ready for autofocus, nothing otherwise. Everything
-else goes to stderr. Exit 0 unless a lens chip answered and could not be set up (exit 1): a camera that should
-focus and cannot is a fault, not a fixed-focus camera.
+else, the output of the tools it runs included, goes to stderr. Exit 0 for "ready" and for "fixed-focus"; exit 1
+when the camera could not be asked, or a lens chip answered and could not be set up: a camera that should
+focus and cannot is a fault, not a fixed-focus camera. A failed set-up is remembered for the boot too, so a
+restarting stream does not unbind and bind the camera drivers over and over.
 
 All of this is volatile: nothing is written outside /run, and a reboot starts from the firmware's device tree.
 """
@@ -34,6 +40,7 @@ import glob
 import json
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -42,13 +49,16 @@ import time
 SYSFS = pathlib.Path(os.environ.get("FPGAS_CAM_SYSFS", "/sys"))
 DT_BASE = SYSFS / "firmware/devicetree/base"
 AF_DIR = pathlib.Path(os.environ.get("FPGAS_CAM_AF_DIR", "/usr/share/fpgas-online/cam/af"))
-TUNING_DIRS = os.environ.get("FPGAS_CAM_TUNING_DIRS", "/usr/share/libcamera/ipa/rpi/pisp:/usr/share/libcamera/ipa/rpi/vc4")
+TUNING_DIR = pathlib.Path(os.environ.get("FPGAS_CAM_TUNING_DIR", "/usr/share/libcamera/ipa/rpi"))
 RUN_DIR = pathlib.Path(os.environ.get("FPGAS_CAM_RUN_DIR", "/run/fpgas-cam"))
+VERDICT = RUN_DIR / "lens-verdict"  # "fixed-focus" or "failed: ...", for this boot
+UNBOUND = RUN_DIR / "lens-unbound.json"  # what bind_lens has unbound and not yet bound again
 
 # Lens motor drivers a sensor overlay may describe, by device-tree compatible.
 LENS_COMPATIBLES = ("adi,ad5398",)
 I2C_RDWR, I2C_M_RD = 0x0707, 0x0001
-PROBE_SECONDS = 10
+PROBE_SECONDS = 12  # how long to wait for the probe capture to deliver frames
+FRAMES_BEFORE_VERDICT = 5  # frames the capture must have delivered before silence means "no lens chip"
 
 OVERLAY = """/dts-v1/;
 /plugin/;
@@ -69,8 +79,17 @@ OVERLAY = """/dts-v1/;
 """
 
 
+class ProbeError(Exception):
+    """The camera could not be powered and asked, so nothing is known about a lens."""
+
+
 def log(*args):
     print("fpgas-cam-lens:", *args, file=sys.stderr, flush=True)
+
+
+def run(cmd):
+    """Run a tool with its stdout on our stderr: our stdout carries the tuning file's path and nothing else."""
+    subprocess.run(cmd, check=True, stdout=sys.stderr)
 
 
 def dt_string(node, prop):
@@ -122,7 +141,11 @@ class Camera:
 
 
 def find_camera():
-    """The first bound I2C device whose device-tree node has a lens motor node as a sibling, or None."""
+    """The first bound I2C device whose device-tree node has a lens motor node as a sibling, or None.
+
+    libcamera's first camera is the one streamed (`cam -c1`, libcamerasrc); on a board with two CSI cameras
+    that need not be this one. No fleet board has two.
+    """
     for device in sorted((SYSFS / "bus/i2c/devices").glob("*-00*")):
         if not (device / "driver").exists() or not (device / "of_node").exists():
             continue
@@ -131,35 +154,47 @@ def find_camera():
             continue
         for sibling in sorted(sensor.parent.iterdir()):
             compatible = dt_string(sibling, "compatible") if sibling.is_dir() else None
-            if compatible and any(c in compatible.split("\0") for c in LENS_COMPATIBLES):
+            if (compatible and any(c in compatible.split("\0") for c in LENS_COMPATIBLES)
+                    and dt_u32(sibling, "reg") is not None):
                 return Camera(device, sensor, sibling)
     return None
 
 
 def find_receiver(camera):
-    """The platform device at the other end of the sensor's CSI-2 link, e.g. .../devices/1f00110000.csi."""
+    """The platform device that owns the far end of the sensor's CSI-2 link, e.g. .../devices/1f00110000.csi.
+
+    Only the endpoint's own device: the node above its `port` (or `ports`). If that node has no platform device
+    the answer is None, never a device further up the tree: on a Pi 5 the next one up is the PCIe root complex
+    the Ethernet hangs off, and this is the device bind_lens unbinds.
+    """
     remote = dt_u32(camera.sensor / "port" / "endpoint", "remote-endpoint")
     if remote is None:
         return None
-    by_node = {}
-    for dev in (SYSFS / "bus/platform/devices").iterdir():
-        if (dev / "of_node").exists():
-            by_node[(dev / "of_node").resolve()] = dev
     for phandle in DT_BASE.rglob("phandle"):
-        if int.from_bytes(phandle.read_bytes()[:4], "big") == remote:
-            node = phandle.parent
-            while node != DT_BASE:
-                if node in by_node:
-                    return by_node[node]
-                node = node.parent
+        if int.from_bytes(phandle.read_bytes()[:4], "big") != remote:
+            continue
+        owner = phandle.parent.parent  # endpoint -> port
+        if not owner.name.startswith("port"):
+            return None
+        owner = owner.parent  # port -> device, or port -> ports
+        if owner.name == "ports":
+            owner = owner.parent
+        for dev in (SYSFS / "bus/platform/devices").iterdir():
+            if (dev / "of_node").exists() and (dev / "of_node").resolve() == owner:
+                return dev
+        return None
     return None
 
 
 def lens_answers(camera):
-    """Does a chip answer at the lens motor's I2C address while the camera is powered?"""
+    """Does a chip answer at the lens motor's I2C address while the camera is powered?
+
+    True or False once the camera is known to be streaming; ProbeError if it could not be made to stream, in
+    which case silence would say nothing about the lens.
+    """
     loaded_here = not (SYSFS / "module/i2c_dev").is_dir()
     if loaded_here:
-        subprocess.run(["modprobe", "i2c-dev"], check=True)
+        run(["modprobe", "i2c-dev"])
 
     class Msg(ctypes.Structure):
         _fields_ = [("addr", ctypes.c_uint16), ("flags", ctypes.c_uint16),
@@ -168,32 +203,48 @@ def lens_answers(camera):
     class Rdwr(ctypes.Structure):
         _fields_ = [("msgs", ctypes.POINTER(Msg)), ("nmsgs", ctypes.c_uint32)]
 
-    # The camera's supply is only on while it streams, and the chip is silent without it.
-    capture = subprocess.Popen(["cam", "-c1", f"--capture={PROBE_SECONDS * 30}"],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    answered = False
+    # The camera's supply is only on while it streams, and the chip is silent without it. `cam` prints one line
+    # per frame; frames arriving is how we know the camera is powered.
+    capture = dev = None
+    answered, frames, tail = False, 0, b""
     try:
+        try:
+            capture = subprocess.Popen(["cam", "-c1", f"--capture={PROBE_SECONDS * 30}"],
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:
+            raise ProbeError(f"cannot run the probe capture: {e}") from e
+        os.set_blocking(capture.stdout.fileno(), False)
         deadline = time.monotonic() + PROBE_SECONDS
-        dev = None
-        while time.monotonic() < deadline and capture.poll() is None and not answered:
-            time.sleep(0.5)
+        while time.monotonic() < deadline and not answered:
+            time.sleep(0.25)
+            chunk = capture.stdout.read() or b""
+            frames += chunk.count(b"seq:")
+            tail = (tail + chunk)[-600:]
             try:
                 dev = dev if dev is not None else os.open(f"/dev/i2c-{camera.bus}", os.O_RDWR)
                 buf = (ctypes.c_uint8 * 2)()
                 fcntl.ioctl(dev, I2C_RDWR, Rdwr((Msg * 1)(Msg(camera.lens_addr, I2C_M_RD, 2, buf)), 1))
                 answered = True
             except OSError:
-                pass  # not powered yet, or nothing there: keep asking until the deadline
+                pass  # not powered yet, or nothing there
+            if frames >= FRAMES_BEFORE_VERDICT or capture.poll() is not None:
+                break
+        if not answered and frames < FRAMES_BEFORE_VERDICT:
+            last = tail.decode(errors="replace").strip().splitlines()[-1:] or ["no output"]
+            raise ProbeError(f"the probe capture delivered {frames} frames (exit {capture.poll()}): {last[0]}")
+        return answered
+    finally:
         if dev is not None:
             os.close(dev)
-    finally:
-        capture.terminate()
-        _, err = capture.communicate(timeout=15)
+        if capture is not None:
+            capture.terminate()
+            try:
+                capture.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                capture.kill()  # it must not keep the camera: the stream is about to want it
+                capture.communicate()
         if loaded_here:
-            subprocess.run(["modprobe", "-r", "i2c-dev"], check=False)
-    if capture.returncode not in (0, -15) and not answered:
-        log("the probe capture failed:", err.decode(errors="replace").strip().splitlines()[-1:] or "no message")
-    return answered
+            subprocess.run(["modprobe", "-r", "i2c-dev"], check=False, stdout=sys.stderr)
 
 
 def sysfs_write(path, text):
@@ -208,26 +259,65 @@ def overlay_text(camera):
     return OVERLAY.format(lens=dt_path(camera.lens), sensor=dt_path(camera.sensor), phandle=phandle)
 
 
+def rebind(note):
+    """Bind the sensor, then the receiver, from a note of what was unbound. Each is tried whatever the other did.
+
+    The receiver is bound even if the sensor would not bind: that is the order of an ordinary boot, and a board
+    with its receiver bound and no sensor is no worse off than one with neither.
+    """
+    errors = []
+    for driver, name in ((note["sensor_driver"], note["sensor"]), (note["receiver_driver"], note["receiver"])):
+        if (pathlib.Path(driver) / name).exists():
+            continue  # already bound
+        try:
+            sysfs_write(pathlib.Path(driver) / "bind", name)
+        except OSError as e:
+            errors.append(f"binding {name}: {e}")
+    return errors
+
+
+def recover():
+    """Finish what an interrupted run left: bind the sensor and the receiver again."""
+    if not UNBOUND.exists():
+        return
+    note = json.loads(UNBOUND.read_text())
+    log(f"an earlier run was interrupted with {note['receiver']} and {note['sensor']} unbound: binding them again")
+    errors = rebind(note)
+    UNBOUND.unlink()
+    for e in errors:
+        log(e)
+    time.sleep(1)  # let the sensor register before find_camera looks for it
+
+
 def bind_lens(camera):
     """Make the two device-tree changes of the overlay's `vcm` parameter and re-probe sensor and receiver."""
     receiver = find_receiver(camera)
     if receiver is None or not (receiver / "driver").exists():
         raise RuntimeError("cannot find the bound camera receiver at the far end of the sensor's CSI-2 link")
     text = overlay_text(camera)
-    receiver_driver = (receiver / "driver").resolve()
-    sensor_driver = (camera.device / "driver").resolve()
-    sysfs_write(receiver_driver / "unbind", receiver.name)
-    sysfs_write(sensor_driver / "unbind", camera.device.name)
+    note = {"receiver": receiver.name, "receiver_driver": str((receiver / "driver").resolve()),
+            "sensor": camera.device.name, "sensor_driver": str((camera.device / "driver").resolve())}
+    # From the first unbind to the last bind nothing may stop us: systemd's SIGTERM on a restart of the stream
+    # service would otherwise leave the camera unbound for the rest of the boot.
+    held = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP})
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            dts, dtbo = f"{tmp}/fpgas-cam-lens.dts", f"{tmp}/fpgas-cam-lens.dtbo"
-            pathlib.Path(dts).write_text(text)
-            subprocess.run(["dtc", "-@", "-I", "dts", "-O", "dtb", "-o", dtbo, dts], check=True)
-            subprocess.run(["dtoverlay", dtbo], check=True)
+        UNBOUND.write_text(json.dumps(note))
+        sysfs_write(pathlib.Path(note["receiver_driver"]) / "unbind", note["receiver"])
+        try:
+            sysfs_write(pathlib.Path(note["sensor_driver"]) / "unbind", note["sensor"])
+            with tempfile.TemporaryDirectory() as tmp:
+                dts, dtbo = f"{tmp}/fpgas-cam-lens.dts", f"{tmp}/fpgas-cam-lens.dtbo"
+                pathlib.Path(dts).write_text(text)
+                run(["dtc", "-@", "-I", "dts", "-O", "dtb", "-o", dtbo, dts])
+                run(["dtoverlay", dtbo])
+        finally:
+            # Bind again whatever happened: a board with the stock tree and a camera beats one with no camera.
+            errors = rebind(note)
+            UNBOUND.unlink()
+        if errors:
+            raise RuntimeError("; ".join(errors))
     finally:
-        # Bind again whatever happened: a board with the stock tree and a camera beats one with no camera.
-        sysfs_write(sensor_driver / "bind", camera.device.name)
-        sysfs_write(receiver_driver / "bind", receiver.name)
+        signal.pthread_sigmask(signal.SIG_SETMASK, held)
     for _ in range(20):
         if camera.lens_bound:
             return
@@ -235,60 +325,86 @@ def bind_lens(camera):
     raise RuntimeError(f"no driver bound to the lens motor at {camera.lens_device.name} after the overlay")
 
 
-def write_tuning(camera):
-    """The stock tuning of this sensor plus our autofocus section, in /run. Returns its path."""
-    section = AF_DIR / f"{camera.sensor_name}.json"
-    if not section.exists():
-        raise RuntimeError(f"no autofocus section for sensor {camera.sensor_name} ({section})")
-    for directory in TUNING_DIRS.split(":"):
-        stock = pathlib.Path(directory) / f"{camera.sensor_name}.json"
-        if stock.exists() and (pathlib.Path(directory).name != "pisp" or is_pisp()):
-            break
-    else:
-        raise RuntimeError(f"no stock libcamera tuning file for sensor {camera.sensor_name} in {TUNING_DIRS}")
-    tuning = json.loads(stock.read_text())
-    tuning["algorithms"] = [a for a in tuning["algorithms"] if "rpi.af" not in a]
-    tuning["algorithms"].append({"rpi.af": json.loads(section.read_text())["rpi.af"]})
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    out = RUN_DIR / f"{camera.sensor_name}_af.json"
-    out.write_text(json.dumps(tuning, indent=1))
-    log(f"tuning: {stock} + {section} -> {out}")
-    return out
-
-
 def is_pisp():
     """Pi 5 family: the camera goes through the PiSP (rp1-cfe); older Pis use the VC4 ISP (unicam)."""
     return bool(glob.glob(str(SYSFS / "bus/platform/drivers/rp1-cfe/*.csi")))
 
 
-def main():
-    camera = find_camera()
-    if camera is None:
-        log("no bound sensor with a lens motor node in the device tree: nothing to do")
-        return 0
+def write_tuning(camera):
+    """The stock tuning of this sensor for this Pi's ISP plus our autofocus section, in /run. Returns its path."""
+    section = AF_DIR / f"{camera.sensor_name}.json"
+    if not section.exists():
+        raise RuntimeError(f"no autofocus section for sensor {camera.sensor_name} ({section})")
+    stock = TUNING_DIR / ("pisp" if is_pisp() else "vc4") / f"{camera.sensor_name}.json"
+    if not stock.exists():
+        raise RuntimeError(f"no stock libcamera tuning file {stock}")
+    tuning = json.loads(stock.read_text())
+    tuning["algorithms"] = [a for a in tuning["algorithms"] if "rpi.af" not in a]
+    tuning["algorithms"].append({"rpi.af": json.loads(section.read_text())["rpi.af"]})
+    out = RUN_DIR / f"{camera.sensor_name}_af.json"
+    part = out.with_suffix(".json.part")
+    part.write_text(json.dumps(tuning, indent=1))
+    part.replace(out)  # never a half-written tuning file where libcamera will read it
+    log(f"tuning: {stock} + {section} -> {out}")
+    return out
+
+
+def decide(camera):
+    """0 with the lens ready, 0 with nothing to do, or 1; and the verdict to remember for this boot, if any."""
     name = f"{camera.sensor_name} at {camera.device.name}, lens node {dt_path(camera.lens)}"
     if camera.lens_enabled and camera.lens_linked and camera.lens_bound:
         log(f"{name}: lens driver already bound")
-    elif camera.lens_enabled or camera.lens_linked:
+        return True, None
+    if camera.lens_enabled or camera.lens_linked:
         log(f"{name}: lens node half set up (enabled={camera.lens_enabled} linked={camera.lens_linked} "
             f"bound={camera.lens_bound})")
-        return 1
-    elif not lens_answers(camera):
-        log(f"{name}: no chip answers at {camera.lens_addr:#04x} while the camera is powered: fixed-focus camera")
-        return 0
-    else:
-        log(f"{name}: a lens chip answers at {camera.lens_addr:#04x}: binding its driver")
-        try:
-            bind_lens(camera)
-        except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
-            log(f"FAILED to bind the lens driver: {e}")
-            return 1
+        return False, None
+    if VERDICT.exists():
+        verdict = VERDICT.read_text().strip()
+        log(f"{name}: decided earlier in this boot: {verdict}")
+        return (None if verdict == "fixed-focus" else False), None
     try:
-        print(write_tuning(camera))
-    except (OSError, RuntimeError, ValueError) as e:
-        log(f"FAILED to write the autofocus tuning: {e}")
-        return 1
-    return 0
+        if not lens_answers(camera):
+            log(f"{name}: no chip answers at {camera.lens_addr:#04x} while the camera is streaming: fixed-focus camera")
+            return None, "fixed-focus"
+    except (ProbeError, OSError, subprocess.CalledProcessError) as e:
+        log(f"{name}: could not ask the camera about a lens: {e}")
+        return False, None  # not remembered: the next start of the stream asks again
+    log(f"{name}: a lens chip answers at {camera.lens_addr:#04x}: binding its driver")
+    try:
+        bind_lens(camera)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
+        log(f"FAILED to bind the lens driver: {e}")
+        return False, f"failed: {e}"
+    return True, None
+
+
+def main():
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    with open(RUN_DIR / "lens-lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("another fpgas-cam-lens is running")
+            return 1
+        recover()
+        camera = find_camera()
+        if camera is None:
+            log("no bound sensor with a lens motor node in the device tree: nothing to do")
+            return 0
+        ready, verdict = decide(camera)
+        if verdict:
+            VERDICT.write_text(verdict + "\n")
+        if ready is None:
+            return 0
+        if not ready:
+            return 1
+        try:
+            print(write_tuning(camera))
+        except (OSError, RuntimeError, ValueError, KeyError) as e:
+            log(f"FAILED to write the autofocus tuning: {e}")
+            return 1
+        return 0
 
 
 if __name__ == "__main__":

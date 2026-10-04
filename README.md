@@ -27,7 +27,9 @@ itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
 2. `fpgas-cam-lens` looks in the device tree for a lens motor node beside the bound sensor. The firmware's
    `ov5647` overlay always describes one (`ad5398@c`), disabled. It then asks the chip itself: a short capture
    powers the camera (the chip is silent without it) and the lens address is read over I2C.
-3. No answer: a fixed-focus camera. Nothing is changed and the stream starts as it always did.
+3. No answer from a camera that is delivering frames: a fixed-focus camera. Nothing is bound or changed, the
+   answer is remembered in `/run/fpgas-cam/` for this boot, and the stream starts as it always did. The cost
+   is the probe itself, once per boot: a few seconds before the first start of the stream.
 4. An answer: the camera receiver and the sensor are unbound, a runtime device-tree overlay makes the two
    changes the overlay's `vcm` parameter would have made (lens node to `okay`, `lens-focus` on the sensor), and
    both are bound again. A lens sub-device with a focus control appears. The helper writes
@@ -59,8 +61,16 @@ Two things that are deliberate:
 - **The receiver is unbound together with the sensor.** Re-probing only the sensor while `rp1-cfe` stays bound
   makes the receiver register its video devices a second time; the kernel oopses in `cfe_async_complete` and
   the Pi then hangs in shutdown until it is power-cycled. Never do that.
-- **A lens that answers but cannot be set up is an error** (`fpgas-cam-lens` exits 1 and says why); the stream
-  still starts, unfocused, and says so in the journal. A fixed-focus camera is not an error.
+- **A lens that answers but cannot be set up is an error**, and so is a camera that could not be asked
+  (`fpgas-cam-lens` exits 1 and says why); the stream still starts, unfocused, and says so in the journal. A
+  failed set-up is remembered for the boot, so a restarting stream does not unbind and bind the camera drivers
+  again and again. A fixed-focus camera is not an error.
+- **The unbind-to-bind step cannot be cut short.** Termination signals are held off while the receiver and the
+  sensor are unbound, what was unbound is noted in `/run/fpgas-cam/` first, and a later run that finds the note
+  binds both again before doing anything else. Only one `fpgas-cam-lens` runs at a time.
+
+A board with two CSI cameras is not handled: the helper takes the first sensor with a lens node, libcamera
+streams its own first camera, and they need not be the same. No fleet board has two.
 
 Not exercised on hardware: Pi 3 and Pi 4 hosts (unicam receiver, VC4 tuning). The helper finds the receiver by
 following the sensor's CSI-2 link in the device tree rather than by name, and picks the VC4 tuning there, but no
@@ -91,7 +101,7 @@ This is normally handled by the [fpgas.online-infra](https://github.com/fpgas-on
 - `gstreamer1.0-plugins-base`
 - `gstreamer1.0-plugins-good`
 - `libcamera-tools`
-- `python3`, `device-tree-compiler`, `kmod` (for `fpgas-cam-lens`)
+- `python3`, `device-tree-compiler`, `raspi-utils-dt` (or `libraspberrypi-bin`), `kmod` (for `fpgas-cam-lens`)
 
 ## Linting
 

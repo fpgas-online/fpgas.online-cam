@@ -10,11 +10,12 @@ depends:
   - gstreamer1.0-plugins-base
   - gstreamer1.0-plugins-good
   - libcamera-tools
-  # fpgas-cam-lens: python3; dtc for the runtime overlay (dtoverlay itself
-  # comes with Raspberry Pi OS); modprobe (kmod) for i2c-dev while it asks
-  # the lens chip
+  # fpgas-cam-lens: python3; dtc and dtoverlay for the runtime overlay
+  # (dtoverlay is in raspi-utils-dt, or in libraspberrypi-bin on older
+  # bookworm images); modprobe (kmod) for i2c-dev while it asks the lens chip
   - python3
   - device-tree-compiler
+  - raspi-utils-dt | libraspberrypi-bin
   - kmod
 contents:
   - src: cam.sh

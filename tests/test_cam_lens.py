@@ -59,7 +59,7 @@ def pi(tmp_path, monkeypatch):
 
     monkeypatch.setenv("FPGAS_CAM_SYSFS", str(sys_root))
     monkeypatch.setenv("FPGAS_CAM_AF_DIR", str(AF_DIR))
-    monkeypatch.setenv("FPGAS_CAM_TUNING_DIRS", f"{stock}:{tmp_path / 'ipa/vc4'}")
+    monkeypatch.setenv("FPGAS_CAM_TUNING_DIR", str(tmp_path / "ipa"))
     monkeypatch.setenv("FPGAS_CAM_RUN_DIR", str(tmp_path / "run"))
     spec = importlib.util.spec_from_file_location("cam_lens", SOURCE)
     module = importlib.util.module_from_spec(spec)
@@ -75,7 +75,8 @@ def pi(tmp_path, monkeypatch):
             (node / "phandle").write_bytes(u32(phandle))
         return node
 
-    module.lens, module.sys_root, module.run_dir = lens, sys_root, tmp_path / "run"
+    module.lens, module.sys_root, module.run_dir, module.base = lens, sys_root, tmp_path / "run", base
+    (tmp_path / "run").mkdir()
     return module
 
 
@@ -168,3 +169,168 @@ def test_shipped_autofocus_section_is_what_libcamera_reads():
     assert set(section["ranges"]) >= {"normal"} and set(section["speeds"]) >= {"normal"}
     low_dioptres, low_code, high_dioptres, high_code = section["map"]
     assert low_dioptres < high_dioptres and 0 <= low_code < high_code <= 1023
+
+
+# --- what the review asked for: the order of the unbind and bind steps, and what is left behind on failure ----
+
+@pytest.fixture
+def steps(pi, monkeypatch):
+    """Record every sysfs write and tool run of bind_lens instead of doing it; returns the list."""
+
+    class Steps(list):
+        pass
+
+    done = Steps()
+
+    def write(path, text):
+        path = pathlib.Path(path)
+        done.append(f"{path.parent.name}/{path.name} {text}")
+        fail = getattr(write, "fail", None)
+        if fail and fail in done[-1]:
+            raise OSError(5, "Input/output error")
+        bound = pathlib.Path(path).parent / text  # mimic the driver core: a bound device appears under its driver
+        if path.name == "bind":
+            bound.mkdir()
+        elif bound.exists():
+            bound.rmdir()
+
+    def run(cmd):
+        done.append(cmd[0])
+        if cmd[0] == getattr(run, "fail", None):
+            raise pi.subprocess.CalledProcessError(1, cmd)
+
+    monkeypatch.setattr(pi, "sysfs_write", write)
+    monkeypatch.setattr(pi, "run", run)
+    monkeypatch.setattr(pi.time, "sleep", lambda seconds: None)
+    # real driver directories for the two devices, as sysfs has them
+    for bus, driver, name in (("i2c", "ov5647", "10-0036"), ("platform", "rp1-cfe", "1f00110000.csi")):
+        d = pi.sys_root / "bus" / bus / "drivers" / driver
+        (d / name).mkdir(parents=True, exist_ok=True)
+        link = pi.sys_root / "bus" / bus / "devices" / name / "driver"
+        link.rmdir()
+        link.symlink_to(d)
+    done.write, done.run = write, run
+    return done
+
+
+RECEIVER_FIRST = ["rp1-cfe/unbind 1f00110000.csi", "ov5647/unbind 10-0036"]
+SENSOR_THEN_RECEIVER = ["ov5647/bind 10-0036", "rp1-cfe/bind 1f00110000.csi"]
+
+
+def test_bind_unbinds_receiver_first_and_binds_it_last(pi, steps):
+    pi.lens()
+    (pi.sys_root / "bus/i2c/devices/10-000c/driver").mkdir(parents=True)  # the lens driver binds after the overlay
+    pi.bind_lens(pi.find_camera())
+    assert steps == RECEIVER_FIRST + ["dtc", "dtoverlay"] + SENSOR_THEN_RECEIVER
+    assert not pi.UNBOUND.exists()
+
+
+def test_failed_overlay_still_binds_both_again(pi, steps):
+    pi.lens()
+    steps.run.fail = "dtc"
+    with pytest.raises(pi.subprocess.CalledProcessError):
+        pi.bind_lens(pi.find_camera())
+    assert steps == RECEIVER_FIRST + ["dtc"] + SENSOR_THEN_RECEIVER
+    assert not pi.UNBOUND.exists()
+
+
+def test_sensor_that_will_not_bind_does_not_stop_the_receiver_bind(pi, steps):
+    pi.lens()
+    steps.write.fail = "ov5647/bind"
+    with pytest.raises(RuntimeError, match="binding 10-0036"):
+        pi.bind_lens(pi.find_camera())
+    assert steps[-2:] == SENSOR_THEN_RECEIVER  # the receiver bind was still attempted
+
+
+def test_failed_sensor_unbind_binds_the_receiver_again(pi, steps):
+    pi.lens()
+    steps.write.fail = "ov5647/unbind"
+    with pytest.raises(OSError):
+        pi.bind_lens(pi.find_camera())
+    assert steps == RECEIVER_FIRST + ["rp1-cfe/bind 1f00110000.csi"]  # the sensor never left its driver
+
+
+def test_nothing_is_unbound_without_a_receiver_or_a_phandle(pi, steps):
+    pi.lens(phandle=None)
+    with pytest.raises(RuntimeError, match="no phandle"):
+        pi.bind_lens(pi.find_camera())
+    (pi.sys_root / "bus/platform/devices/1f00110000.csi/of_node").unlink()
+    with pytest.raises(RuntimeError, match="cannot find the bound camera receiver"):
+        pi.bind_lens(pi.find_camera())
+    assert steps == []
+
+
+def test_receiver_is_never_a_device_further_up_the_tree(pi):
+    # the csi node has no platform device, but its ancestor (the PCIe root complex on a Pi 5) has one:
+    # unbinding that would take the Ethernet, and a netbooted Pi's root, with it
+    pi.lens()
+    (pi.sys_root / "bus/platform/devices/1f00110000.csi/of_node").unlink()
+    parent = pi.sys_root / "bus/platform/devices/1000120000.pcie"
+    parent.mkdir()
+    (parent / "of_node").symlink_to(pi.base / "axi/pcie@1000120000")
+    (parent / "driver").mkdir()
+    assert pi.find_receiver(pi.find_camera()) is None
+
+
+def test_interrupted_run_is_finished_by_the_next_one(pi, steps):
+    pi.lens()
+    camera = pi.find_camera()
+    note = {"receiver": "1f00110000.csi", "receiver_driver": str(pi.sys_root / "bus/platform/drivers/rp1-cfe"),
+            "sensor": "10-0036", "sensor_driver": str(pi.sys_root / "bus/i2c/drivers/ov5647")}
+    pi.UNBOUND.write_text(json.dumps(note))
+    (pi.sys_root / "bus/platform/drivers/rp1-cfe/1f00110000.csi").rmdir()  # killed with both unbound
+    (pi.sys_root / "bus/i2c/drivers/ov5647/10-0036").rmdir()
+    pi.recover()
+    assert steps == SENSOR_THEN_RECEIVER and not pi.UNBOUND.exists()
+    assert camera.device.name == "10-0036"
+
+
+def test_camera_that_could_not_be_asked_is_an_error_and_is_asked_again(pi, monkeypatch, capsys):
+    pi.lens()
+
+    def cannot(camera):
+        raise pi.ProbeError("the probe capture delivered 0 frames (exit 1): camera busy")
+
+    monkeypatch.setattr(pi, "lens_answers", cannot)
+    assert pi.main() == 1
+    assert "could not ask the camera" in capsys.readouterr().err
+    assert not pi.VERDICT.exists()  # nothing is known, so nothing is remembered
+
+
+def test_fixed_focus_verdict_is_remembered_for_the_boot(pi, monkeypatch, capsys):
+    pi.lens()
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: False)
+    assert pi.main() == 0
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: pytest.fail("must not probe a second time"))
+    assert pi.main() == 0
+    assert "decided earlier in this boot: fixed-focus" in capsys.readouterr().err
+
+
+def test_failed_bind_is_not_retried_in_the_same_boot(pi, monkeypatch, capsys):
+    pi.lens()
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: True)
+
+    def fail(camera):
+        raise RuntimeError("dtoverlay is not installed")
+
+    monkeypatch.setattr(pi, "bind_lens", fail)
+    assert pi.main() == 1
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: pytest.fail("must not probe again"))
+    monkeypatch.setattr(pi, "bind_lens", lambda camera: pytest.fail("must not unbind the camera again"))
+    assert pi.main() == 1
+    assert "decided earlier in this boot: failed: dtoverlay is not installed" in capsys.readouterr().err
+
+
+def test_vc4_tuning_is_not_used_on_a_pisp_board(pi, tmp_path):
+    pi.lens()
+    (tmp_path / "ipa/pisp/ov5647.json").rename(tmp_path / "ipa/ov5647.json.moved")
+    (tmp_path / "ipa/vc4").mkdir()
+    (tmp_path / "ipa/vc4/ov5647.json").write_text(json.dumps({"version": 2.0, "target": "bcm2835", "algorithms": []}))
+    with pytest.raises(RuntimeError, match="no stock libcamera tuning file"):
+        pi.write_tuning(pi.find_camera())
+
+
+def test_lens_node_without_an_address_is_not_a_lens(pi):
+    node = pi.lens()
+    (node / "reg").unlink()
+    assert pi.find_camera() is None

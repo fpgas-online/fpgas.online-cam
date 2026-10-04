@@ -36,6 +36,10 @@ V4L_BYID=${V4L_BYID:-/dev/v4l/by-id}
 CAM_WAIT_TRIES=${CAM_WAIT_TRIES:-10}
 CAM_WAIT_SECS=${CAM_WAIT_SECS:-3}
 CAM_LENS=${CAM_LENS:-/usr/local/bin/fpgas-cam-lens}
+# Set when the source is a CSI camera through libcamera (detected below, or
+# given as exactly CAM_SRC=libcamerasrc); never inherited from the environment.
+CSI=
+if [ "${CAM_SRC:-}" = "libcamerasrc" ]; then CSI=1; fi
 
 find_camera() {
     if grep -qsE ' [0-9]+-00[0-9a-f]{2}$' "${V4L_SYSFS}"/v4l-subdev*/name; then
@@ -75,12 +79,16 @@ if [ -z "${CAM_SRC:-}" ]; then
     if [ "${CAM_SRC}" = "libcamerasrc" ]; then
         CSI=1
         if tuning=$("${CAM_LENS}"); then
-            if [ -n "${tuning}" ]; then
+            # Only a file that exists: a wrong path would stop libcamera
+            # starting the camera at all.
+            if [ -n "${tuning}" ] && [ -f "${tuning}" ]; then
                 export LIBCAMERA_RPI_TUNING_FILE="${tuning}"
                 CAM_SRC="libcamerasrc af-mode=continuous"
+            elif [ -n "${tuning}" ]; then
+                echo "${CAM_LENS} printed '${tuning}', which is not a file: streaming with the stock tuning, unfocused" >&2
             fi
         else
-            echo "${CAM_LENS} failed (see above): this camera has a lens motor that could not be set up; streaming unfocused" >&2
+            echo "${CAM_LENS} failed (exit $?, see above): streaming without autofocus" >&2
         fi
     fi
 fi
