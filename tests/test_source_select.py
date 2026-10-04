@@ -225,3 +225,26 @@ def test_csi_flag_is_not_inherited_from_the_environment(board):
     r = board(encoder="sw", CSI="1")
     assert r.returncode == 0, r.stderr
     assert not any(w.startswith("video/x-raw,width=") for w in r.stdout.split())
+
+
+def test_camera_left_unbound_by_a_killed_helper_is_bound_again_before_the_wait(board, tmp_path):
+    # No sensor node at the start: the killed helper had unbound the camera. The stub's --recover makes the node
+    # appear, as binding the drivers again does, so the script only finds a camera if it asked for recovery first.
+    note = tmp_path / "lens-unbound.json"
+    note.write_text("{}")
+    sensor = tmp_path / "video4linux" / "v4l-subdev0"
+    helper = lens_helper(tmp_path, f'echo "args:$*" >> {tmp_path}/lens-args\n'
+                         f'if [ "$1" = --recover ]; then rm {note}; mkdir {sensor}; '
+                         f'echo "ov5647 10-0036" > {sensor}/name; echo not-a-path; fi')
+    r = board(CAM_LENS=helper, CAM_LENS_NOTE=str(note), CAM_WAIT_TRIES="1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[0] == "libcamerasrc"  # and the recovery's stdout went nowhere near the pipeline
+    assert (tmp_path / "lens-args").read_text() == "args:--recover\nargs:\n"
+
+
+def test_no_note_no_recovery_call(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    helper = lens_helper(tmp_path, f'echo "args:$*" >> {tmp_path}/lens-args')
+    r = board(CAM_LENS=helper, CAM_LENS_NOTE=str(tmp_path / "no-note.json"))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "lens-args").read_text() == "args:\n"

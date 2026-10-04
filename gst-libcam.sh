@@ -36,6 +36,8 @@ V4L_BYID=${V4L_BYID:-/dev/v4l/by-id}
 CAM_WAIT_TRIES=${CAM_WAIT_TRIES:-10}
 CAM_WAIT_SECS=${CAM_WAIT_SECS:-3}
 CAM_LENS=${CAM_LENS:-/usr/local/bin/fpgas-cam-lens}
+# fpgas-cam-lens's note of camera drivers it has unbound and not yet bound again.
+CAM_LENS_NOTE=${CAM_LENS_NOTE:-/run/fpgas-cam/lens-unbound.json}
 # Set when the source is a CSI camera through libcamera (detected below, or
 # given as exactly CAM_SRC=libcamerasrc); never inherited from the environment.
 CSI=
@@ -55,6 +57,14 @@ find_camera() {
 }
 
 if [ -z "${CAM_SRC:-}" ]; then
+    # A fpgas-cam-lens that was killed between unbinding and binding the camera
+    # drivers left no sensor for find_camera to see, and a note. Have it bind
+    # them again first, or this start would end in "no camera" (exit 78).
+    if [ -e "${CAM_LENS_NOTE}" ]; then
+        "${CAM_LENS}" --recover >&2 ||
+            echo "${CAM_LENS} --recover failed (exit $?, see above)" >&2
+    fi
+
     try=1
     until find_camera; do
         echo "no camera found (try ${try}/${CAM_WAIT_TRIES})" >&2

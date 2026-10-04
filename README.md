@@ -27,9 +27,11 @@ itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
 2. `fpgas-cam-lens` looks in the device tree for a lens motor node beside the bound sensor. The firmware's
    `ov5647` overlay always describes one (`ad5398@c`), disabled. It then asks the chip itself: a short capture
    powers the camera (the chip is silent without it) and the lens address is read over I2C.
-3. No answer from a camera that is delivering frames: a fixed-focus camera. Nothing is bound or changed, the
-   answer is remembered in `/run/fpgas-cam/` for this boot, and the stream starts as it always did. The cost
-   is the probe itself, once per boot: a few seconds before the first start of the stream.
+3. The address stays unacknowledged over several reads while the camera is delivering frames: a fixed-focus
+   camera. Nothing is bound or changed, the answer is remembered in `/run/fpgas-cam/` for this boot, and the
+   stream starts as it always did. The cost is the probe itself, once per boot: a few seconds before the first
+   start of the stream. Anything else (no frames, the I2C bus cannot be opened, reads failing some other way)
+   is "could not ask", not "fixed-focus": it is an error, is not remembered, and the next start asks again.
 4. An answer: the camera receiver and the sensor are unbound, a runtime device-tree overlay makes the two
    changes the overlay's `vcm` parameter would have made (lens node to `okay`, `lens-focus` on the sensor), and
    both are bound again. A lens sub-device with a focus control appears. The helper writes
@@ -67,7 +69,9 @@ Two things that are deliberate:
   again and again. A fixed-focus camera is not an error.
 - **The unbind-to-bind step cannot be cut short.** Termination signals are held off while the receiver and the
   sensor are unbound, what was unbound is noted in `/run/fpgas-cam/` first, and a later run that finds the note
-  binds both again before doing anything else. Only one `fpgas-cam-lens` runs at a time.
+  binds both again before doing anything else. A run that was killed outright leaves no sensor to find, so
+  `gst-libcam.sh` runs `fpgas-cam-lens --recover` when the note exists, before it looks for a camera. The
+  overlay tools run under a time limit. Only one `fpgas-cam-lens` runs at a time.
 
 A board with two CSI cameras is not handled: the helper takes the first sensor with a lens node, libcamera
 streams its own first camera, and they need not be the same. No fleet board has two.

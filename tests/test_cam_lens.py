@@ -334,3 +334,157 @@ def test_lens_node_without_an_address_is_not_a_lens(pi):
     node = pi.lens()
     (node / "reg").unlink()
     assert pi.find_camera() is None
+
+
+# --- second review: the probe itself, a note that is not a note, and recovery on its own -------------------------
+
+@pytest.fixture
+def probe(pi, monkeypatch):
+    """lens_answers against a fake capture and a fake I2C bus; `probe(...)` returns its answer or raises.
+
+    frames: "seq:" lines the capture prints per 0.25 s tick. reads: what each I2C read does, in order (the last
+    repeats): True answers, an errno fails with it. opens: errnos the first opens of /dev/i2c-N fail with.
+    """
+    import errno
+    import types
+
+    (pi.sys_root / "module/i2c_dev").mkdir(parents=True)  # already loaded: no modprobe
+    pi.lens()
+
+    def ask(frames=2, reads=(errno.EREMOTEIO,), opens=(), exits=None):
+        clock, reads_left, opens_left = [0.0], list(reads), list(opens)
+        ask.read_count = 0
+
+        class Out:
+            def fileno(self):
+                return 7
+
+            def read(self):
+                return b"seq: 000001 bytesused: 1\n" * frames
+
+        class Capture:
+            stdout = Out()
+
+            def poll(self):
+                return exits
+
+            def terminate(self):
+                ask.terminated = True
+
+            def communicate(self, timeout=None):
+                return b"", None
+
+        def os_open(path, flags):
+            assert path == "/dev/i2c-10"
+            if opens_left:
+                raise OSError(opens_left.pop(0), "open failed")
+            return 99
+
+        def ioctl(dev, request, arg):
+            assert (dev, request) == (99, pi.I2C_RDWR)
+            ask.read_count += 1
+            result = reads_left.pop(0) if len(reads_left) > 1 else reads_left[0]
+            if result is not True:
+                raise OSError(result, "read failed")
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        monkeypatch.setattr(pi.subprocess, "Popen", lambda *a, **k: Capture())
+        monkeypatch.setattr(pi, "os", types.SimpleNamespace(
+            open=os_open, close=lambda dev: None, set_blocking=lambda fd, on: None, O_RDWR=2, environ={}))
+        monkeypatch.setattr(pi, "fcntl", types.SimpleNamespace(ioctl=ioctl))
+        monkeypatch.setattr(pi, "time", types.SimpleNamespace(sleep=sleep, monotonic=lambda: clock[0]))
+        return pi.lens_answers(pi.find_camera())
+
+    ask.errno = errno
+    return ask
+
+
+def test_probe_lens_chip_that_answers(probe):
+    assert probe(reads=(probe.errno.EREMOTEIO, probe.errno.EREMOTEIO, True)) is True  # silent until powered
+    assert probe.terminated
+
+
+def test_probe_streaming_camera_that_stays_silent_is_fixed_focus(probe, pi):
+    assert probe(frames=2, reads=(probe.errno.EREMOTEIO,)) is False
+    # 5 frames arrive on the third tick; from then on four unanswered reads are needed, not one
+    assert probe.read_count == 2 + pi.SILENCES_BEFORE_VERDICT
+    assert probe(reads=(probe.errno.ENXIO,)) is False
+
+
+def test_probe_without_frames_says_nothing_about_the_lens(probe, pi):
+    with pytest.raises(pi.ProbeError, match="delivered 0 frames"):
+        probe(frames=0)
+    with pytest.raises(pi.ProbeError, match=r"delivered 0 frames \(exit 1\)"):
+        probe(frames=0, exits=1)
+
+
+@pytest.mark.parametrize("error", ["EIO", "ETIMEDOUT", "EAGAIN", "EBUSY"])
+def test_probe_bus_errors_are_not_a_fixed_focus_camera(probe, pi, error):
+    with pytest.raises(pi.ProbeError, match="last I2C error"):
+        probe(frames=2, reads=(getattr(probe.errno, error),))
+
+
+def test_probe_bus_that_cannot_be_opened_is_not_a_fixed_focus_camera(probe, pi):
+    with pytest.raises(pi.ProbeError, match="open failed"):
+        probe(opens=[probe.errno.EACCES] * 1000)
+
+
+def test_probe_waits_for_the_bus_node_to_appear(probe):
+    assert probe(opens=[probe.errno.ENOENT] * 3, reads=(True,)) is True
+    assert probe(opens=[probe.errno.ENOENT] * 3, reads=(probe.errno.EREMOTEIO,)) is False
+
+
+def test_run_kills_a_tool_that_hangs(pi, monkeypatch):
+    monkeypatch.setattr(pi, "TOOL_SECONDS", 0.2)
+    with pytest.raises(pi.subprocess.TimeoutExpired):
+        pi.run(["sleep", "30"])
+
+
+def test_hung_overlay_tool_still_binds_both_again_and_is_a_failed_bind(pi, steps, monkeypatch, capsys):
+    pi.lens()
+
+    def hung(cmd):
+        steps.append(cmd[0])
+        raise pi.subprocess.TimeoutExpired(cmd, 30)
+
+    monkeypatch.setattr(pi, "run", hung)
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: True)
+    assert pi.main() == 1
+    assert steps == RECEIVER_FIRST + ["dtc"] + SENSOR_THEN_RECEIVER
+    assert pi.VERDICT.read_text().startswith("failed:") and not pi.UNBOUND.exists()
+
+
+@pytest.mark.parametrize("text", ['{"receiver": "1f0011', "{}", "[]", ""])
+def test_note_that_is_not_a_note_is_removed_and_does_not_stop_the_run(pi, steps, capsys, text):
+    pi.UNBOUND.write_text(text)
+    assert pi.main() == 0  # no lens node on this board: nothing to do, as for any fixed-focus camera
+    assert steps == [] and not pi.UNBOUND.exists()
+    assert "is not a note of what was unbound" in capsys.readouterr().err
+
+
+def test_note_and_verdict_are_written_whole(pi, steps, monkeypatch):
+    pi.lens()
+    seen = []
+    real = pi.sysfs_write
+    monkeypatch.setattr(pi, "sysfs_write", lambda path, text: (seen.append(json.loads(pi.UNBOUND.read_text())),
+                                                               real(path, text)))
+    (pi.sys_root / "bus/i2c/devices/10-000c/driver").mkdir(parents=True)
+    pi.bind_lens(pi.find_camera())
+    assert len(seen) == 4 and all(note["sensor"] == "10-0036" for note in seen)  # complete at every step
+    assert list(pi.run_dir.glob("*.part")) == []
+
+
+def test_recover_alone_binds_and_does_nothing_else(pi, steps, monkeypatch, capsys):
+    pi.lens()
+    note = {"receiver": "1f00110000.csi", "receiver_driver": str(pi.sys_root / "bus/platform/drivers/rp1-cfe"),
+            "sensor": "10-0036", "sensor_driver": str(pi.sys_root / "bus/i2c/drivers/ov5647")}
+    pi.UNBOUND.write_text(json.dumps(note))
+    (pi.sys_root / "bus/platform/drivers/rp1-cfe/1f00110000.csi").rmdir()
+    (pi.sys_root / "bus/i2c/drivers/ov5647/10-0036").rmdir()
+    monkeypatch.setattr(pi, "lens_answers", lambda camera: pytest.fail("--recover must not probe"))
+    assert pi.main(["--recover"]) == 0
+    assert steps == SENSOR_THEN_RECEIVER and not pi.UNBOUND.exists()
+    assert capsys.readouterr().out == ""
+    assert pi.main(["--bogus"]) == 2
