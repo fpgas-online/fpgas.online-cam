@@ -35,6 +35,7 @@ V4L_SYSFS=${V4L_SYSFS:-/sys/class/video4linux}
 V4L_BYID=${V4L_BYID:-/dev/v4l/by-id}
 CAM_WAIT_TRIES=${CAM_WAIT_TRIES:-10}
 CAM_WAIT_SECS=${CAM_WAIT_SECS:-3}
+CAM_LENS=${CAM_LENS:-/usr/local/bin/fpgas-cam-lens}
 
 find_camera() {
     if grep -qsE ' [0-9]+-00[0-9a-f]{2}$' "${V4L_SYSFS}"/v4l-subdev*/name; then
@@ -61,6 +62,27 @@ if [ -z "${CAM_SRC:-}" ]; then
         try=$((try + 1))
         sleep "${CAM_WAIT_SECS}"
     done
+
+    # A CSI camera may have a lens motor (the autofocus OV5647 modules over
+    # the Acorns). Every Pi boots the same config.txt, so nothing has bound
+    # the lens driver; fpgas-cam-lens asks the camera itself, binds the
+    # driver if a lens chip answers, and prints the libcamera tuning file to
+    # use. libcamera then finds the sharpest lens position from the picture
+    # each time the stream starts (continuous: it scans at start and only
+    # again if the picture goes soft), so focus survives a power cycle
+    # without any stored per-board position. A fixed-focus camera prints
+    # nothing and streams as before.
+    if [ "${CAM_SRC}" = "libcamerasrc" ]; then
+        CSI=1
+        if tuning=$("${CAM_LENS}"); then
+            if [ -n "${tuning}" ]; then
+                export LIBCAMERA_RPI_TUNING_FILE="${tuning}"
+                CAM_SRC="libcamerasrc af-mode=continuous"
+            fi
+        else
+            echo "${CAM_LENS} failed (see above): this camera has a lens motor that could not be set up; streaming unfocused" >&2
+        fi
+    fi
 fi
 
 if [ -z "${RTMP_DEST:-}" ]; then
@@ -102,7 +124,7 @@ else
     # scale - the USB grabber leg built by find_camera() pins YUY2 1280x720
     # (the MS2109 offers nothing else at 10 fps), and a test CAM_SRC
     # (tests/ci) pins whatever the test asked for.
-    if [ "${CAM_SRC}" = "libcamerasrc" ]; then
+    if [ -n "${CSI:-}" ]; then
         WIDTH=${WIDTH:-640}
         HEIGHT=${HEIGHT:-540}
     fi
