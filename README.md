@@ -35,11 +35,24 @@ itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
 5. `gst-libcam.sh` then runs `libcamerasrc af-mode=continuous` with that tuning file. libcamera scans for the
    sharpest lens position from the picture when the stream starts, and again only if the picture goes soft.
 
-Measured on a Pi 5 with the autofocus module about 10 cm above an Acorn (2026-10-04, kernel
-6.12.109+rpt-rpi-v8, libcamera 0.5.2+rpt20250903): the lens driver bound, libcamera settled on lens code 371
-about 12 s after the stream started (a hand sweep of the same board found 384 sharpest) and stayed there for
-three minutes of watching. A second board of the same kind is sharpest at code 320, which is why one fixed
-position for the fleet cannot work.
+Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v8, libcamera
+0.5.2+rpt20250903, files copied into the running system and `systemctl restart fpgas-cam`):
+
+- Fixed-focus OV5647: the helper logged "no chip answers at 0x0c while the camera is powered: fixed-focus
+  camera", changed nothing, and the stream started with the stock tuning as before.
+- Autofocus OV5647 about 10 cm above an Acorn: the helper logged "a lens chip answers at 0x0c: binding its
+  driver", unbound and bound receiver and sensor, and an `ad5398 focus` sub-device appeared; the stream started
+  with `af-mode=continuous` and `/run/fpgas-cam/ov5647_af.json`, scanned, and came to rest at lens code 310
+  within about 15 s; it then held that code for the 190 s it was watched. The picture is sharp (LEDs, part
+  markings and a QR code readable). A second start in the same boot logged "lens driver already bound" and
+  focused again.
+- With libcamera's stock re-trigger values the lens re-scanned about every 80 s on that still scene and rested
+  at a different code each time (302 to 374); `af/ov5647.json` therefore scans once at start and holds.
+- A hand sweep of the same camera the evening before found code 384 sharpest and libcamera chooses about 310;
+  both give a sharp picture. A second camera of the same kind is sharpest by hand at code 320, which is why
+  one fixed position for the fleet cannot work.
+
+Not yet run: a start in the dark (only the board's LEDs lit).
 
 Two things that are deliberate:
 
