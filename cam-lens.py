@@ -56,6 +56,11 @@ RUN_DIR = pathlib.Path(os.environ.get("FPGAS_CAM_RUN_DIR", "/run/fpgas-cam"))
 VERDICT = RUN_DIR / "lens-verdict"  # "fixed-focus" or "failed: ...", for this boot
 UNBOUND = RUN_DIR / "lens-unbound.json"  # what bind_lens has unbound and not yet bound again
 
+# Camera receiver drivers the unbind and bind below have been run on (Pi 5, 5 Oct 2026). Unbinding any other
+# (unicam on a Pi 3 or 4) has never been tried, and a kernel fault there would cost the board its camera: a
+# lens behind another receiver is an error, the stream starts unfocused, and nothing is unbound.
+TESTED_RECEIVERS = ("rp1-cfe",)
+
 # Lens motor drivers a sensor overlay may describe, by device-tree compatible.
 LENS_COMPATIBLES = ("adi,ad5398",)
 I2C_RDWR, I2C_M_RD = 0x0707, 0x0001
@@ -333,6 +338,10 @@ def bind_lens(camera):
     text = overlay_text(camera)
     note = {"receiver": receiver.name, "receiver_driver": str((receiver / "driver").resolve()),
             "sensor": camera.device.name, "sensor_driver": str((camera.device / "driver").resolve())}
+    receiver_driver = pathlib.Path(note["receiver_driver"]).name
+    if receiver_driver not in TESTED_RECEIVERS:
+        raise RuntimeError(f"the camera receiver {receiver.name} is driven by {receiver_driver}; unbinding it has "
+                           f"not been tried (only {', '.join(TESTED_RECEIVERS)}), so the lens is left unbound")
     # From the first unbind to the last bind nothing may stop us: systemd's SIGTERM on a restart of the stream
     # service would otherwise leave the camera unbound for the rest of the boot.
     held = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT, signal.SIGHUP})

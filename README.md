@@ -37,11 +37,14 @@ itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
    both are bound again. A lens sub-device with a focus control appears. The helper writes
    `/run/fpgas-cam/<sensor>_af.json` (the stock libcamera tuning plus `af/<sensor>.json`) and prints its path.
 5. `gst-libcam.sh` then runs `libcamerasrc af-mode=continuous` with that tuning file. libcamera scans for the
-   sharpest lens position from the picture when the stream starts. After that it scans again only when the
-   scene changes: the picture's contrast, or its mean red, green or blue, moves by more than the factor
-   `retrigger_ratio` (0.3 here) from the last scan and stays changed for `retrigger_delay` frames (60, 10 s
-   at 6 fps). That is `Af::doAF` in libcamera's `src/ipa/rpi/controller/rpi/af.cpp` (v0.5.2+rpt20250903).
-   A room light going on or off is such a change.
+   sharpest lens position from the picture when the stream starts. After that it scans again only after the
+   scene has changed and then held still: a change is the picture's contrast, or its mean red, green or blue,
+   falling below `retrigger_ratio` (0.3 here, so to under about a third) of its reference value or rising
+   above the reference by the same factor (`new + 1 < 0.3 * old` or `old + 1 < 0.3 * new`); each change
+   becomes the new reference, and a scan starts once `retrigger_delay` frames (60, 10 s at 6 fps) pass with
+   no further change. That is `Af::doAF` in libcamera's `src/ipa/rpi/controller/rpi/af.cpp`
+   (v0.5.2+rpt20250903). A room light going on or off is such a change (frame brightness about 27 against
+   about 116 of 255 here).
 
 In a dark room the lens does not hold still. With only the boards' LEDs lit, contrast and brightness are
 near zero, so the noise on them is enough to start a scan, and the lens drifts. That is accepted: the picture
@@ -51,7 +54,7 @@ in the light. No dark threshold is added on top of libcamera's.
 Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v8, libcamera
 0.5.2+rpt20250903, files copied into the running system and `systemctl restart fpgas-cam`):
 
-- Fixed-focus OV5647: the helper logged "no chip answers at 0x0c while the camera is powered: fixed-focus
+- Fixed-focus OV5647: the helper logged "no chip answers at 0x0c while the camera is streaming: fixed-focus
   camera", changed nothing, and the stream started with the stock tuning as before.
 - Autofocus OV5647 about 10 cm above an Acorn: the helper logged "a lens chip answers at 0x0c: binding its
   driver", unbound and bound receiver and sensor, and an `ad5398 focus` sub-device appeared; the stream started
@@ -70,7 +73,7 @@ In the dark (5 and 6 Oct 2026, the same autofocus camera, frame brightness about
 errors); left alone, the lens was at codes 280, 292 and 388 at looks an hour apart; it had also scanned when
 the light went off.
 
-Two things that are deliberate:
+Things that are deliberate:
 
 - **The receiver is unbound together with the sensor.** Re-probing only the sensor while `rp1-cfe` stays bound
   makes the receiver register its video devices a second time; the kernel oopses in `cfe_async_complete` and
@@ -88,9 +91,10 @@ Two things that are deliberate:
 A board with two CSI cameras is not handled: the helper takes the first sensor with a lens node, libcamera
 streams its own first camera, and they need not be the same. No fleet board has two.
 
-Not exercised on hardware: Pi 3 and Pi 4 hosts (unicam receiver, VC4 tuning). The helper finds the receiver by
-following the sensor's CSI-2 link in the device tree rather than by name, and picks the VC4 tuning there, but no
-autofocus module has been tried on one.
+Pi 3 and Pi 4 hosts (unicam receiver, VC4 tuning): a fixed-focus camera there is found to be one and left as it
+was. A lens that answers behind any receiver other than `rp1-cfe` is an error: unbinding unicam has never been
+tried, so the helper says so, unbinds nothing, and the stream starts unfocused (`TESTED_RECEIVERS` in
+`cam-lens.py`).
 
 ## Packaging
 

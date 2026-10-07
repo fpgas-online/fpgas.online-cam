@@ -251,6 +251,18 @@ def test_failed_sensor_unbind_binds_the_receiver_again(pi, steps):
     assert steps == RECEIVER_FIRST + ["rp1-cfe/bind 1f00110000.csi"]  # the sensor never left its driver
 
 
+def test_nothing_is_unbound_behind_a_receiver_that_was_never_tried(pi, steps):
+    pi.lens()
+    unicam = pi.sys_root / "bus/platform/drivers/unicam"
+    (unicam / "1f00110000.csi").mkdir(parents=True)
+    link = pi.sys_root / "bus/platform/devices/1f00110000.csi/driver"
+    link.unlink()
+    link.symlink_to(unicam)
+    with pytest.raises(RuntimeError, match="driven by unicam; unbinding it has not been tried"):
+        pi.bind_lens(pi.find_camera())
+    assert steps == [] and not pi.UNBOUND.exists()
+
+
 def test_nothing_is_unbound_without_a_receiver_or_a_phandle(pi, steps):
     pi.lens(phandle=None)
     with pytest.raises(RuntimeError, match="no phandle"):

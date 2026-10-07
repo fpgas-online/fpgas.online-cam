@@ -6,7 +6,7 @@
         "map: lens position in dioptres -> lens code. Measured 2026-10-04 on two modules about 10 cm (10",
         "dioptres) above an Acorn: sharpest at codes 320 and 384, and nothing moves below about 190.",
         "retrigger_ratio 0.3 / retrigger_delay 60: scan once when the stream starts, then hold. With the",
-        "stock 0.8 / 10 the lens re-scanned about every 80 s on a still scene (blinking LEDs change the",
+        "0.8 / 10 of libcamera's imx708 tuning the lens re-scanned about every 80 s on a still scene (blinking LEDs change the",
         "contrast) and came to rest at a different code each time. step_frames 6: the stream runs at 6 fps."
     ],
     "rpi.af": {
