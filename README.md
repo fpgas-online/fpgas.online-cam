@@ -52,12 +52,12 @@ is too dark to use whatever the lens does. No dark threshold is added on top of 
 
 **Only a large change of light starts a new focus scan.** With `retrigger_ratio` 0.3 the scene has to change
 by about 3.3 times. Measured over the autofocus camera at Welland, 7 and 8 Oct 2026, in mean frame brightness
-(0 to 255): dark, only the boards' LEDs, 23 to 29; dim daylight through the room, 43 to 52; the room light,
-about 116. So the room light going on or off starts a scan (it did, going off), but dim daylight does not: from
-the dark it would take about 90. Through a dim morning the lens therefore stays where the dark left it, and the
-picture is soft (lens code 500 against 310 to 353 when focused in the room light), until the room light comes
-on. A smaller ratio would refocus on dim daylight, at the risk of the frequent re-scans of a large one (see
-`af/ov5647.json`); it has not been tried.
+(0 to 255): dark, only the boards' LEDs, 23 to 29; the room light about 116. The room light going off started a
+scan (7 Oct, about 23:00). The next morning dim daylight (43 to 62, 07:15 to 08:02) did not, and the lens stayed
+where the dark had left it (lens code 500, picture soft). When the daylight reached about 85 (08:17) it did, and
+the lens came to 312, sharp, as in the room light (310 to 353). So the picture can stay soft through the first
+hour or so of a dim morning. A smaller ratio would refocus sooner, at the risk of the frequent re-scans of a
+large one (see `af/ov5647.json`); it has not been tried.
 
 Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v8, libcamera
 0.5.2+rpt20250903, files copied into the running system and `systemctl restart fpgas-cam`):
