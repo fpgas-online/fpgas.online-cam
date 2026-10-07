@@ -17,7 +17,9 @@ feed.** From this repository's [`gst-libcam.sh`](../gst-libcam.sh) and [`cam.ser
 3. encodes H.264 at 6 frames per second (`FPS`, default 6), with the hardware encoder (`v4l2h264enc`) where
    there is one and `x264enc` where there is not (a Pi 5), with one keyframe per second, and a clock
    (`clockoverlay`) drawn over the picture;
-4. publishes to `rtmp://<the Pi's default gateway>/pib/<the Pi's short name>`.
+4. publishes to `rtmp://<the Pi's default gateway>/pib/<the Pi's short name>`. The gateway is read from the
+   route table (`ip -json route show default`, parsed with `jq`), not from a setting; `RTMP_DEST` in the
+   environment replaces the whole URL (`gst-libcam.sh` lines 15 and 66-84, read 2026-10-07).
 
 Any other failure (the stream server restarting, say) is retried every second.
 
