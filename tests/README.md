@@ -26,8 +26,8 @@ Locally, with docker:
     docker build -t fpgas-cam-e2e -f tests/ci/Dockerfile tests/ci
     docker run --rm -v "$PWD:/src:ro" fpgas-cam-e2e uv run --no-project tests/ci/e2e.py
 
-(Add `--network host` to both if containers on your machine have no DNS, as
-on ten64.) Everything binds 127.0.0.1:18080 (http) and :11935 (rtmp).
+(Add `--network host` to both if containers on your machine have no DNS.)
+Everything binds 127.0.0.1:18080 (http) and :11935 (rtmp).
 
 The image installs Google Chrome stable (Google's deb, amd64 and arm64) and
 the tool logs its version. Do not substitute a Chromium build: Playwright's
