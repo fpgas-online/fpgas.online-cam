@@ -37,7 +37,16 @@ itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
    both are bound again. A lens sub-device with a focus control appears. The helper writes
    `/run/fpgas-cam/<sensor>_af.json` (the stock libcamera tuning plus `af/<sensor>.json`) and prints its path.
 5. `gst-libcam.sh` then runs `libcamerasrc af-mode=continuous` with that tuning file. libcamera scans for the
-   sharpest lens position from the picture when the stream starts, and again only if the picture goes soft.
+   sharpest lens position from the picture when the stream starts. After that it scans again only when the
+   scene changes: the picture's contrast, or its mean red, green or blue, moves by more than the factor
+   `retrigger_ratio` (0.3 here) from the last scan and stays changed for `retrigger_delay` frames (60, 10 s
+   at 6 fps). That is `Af::doAF` in libcamera's `src/ipa/rpi/controller/rpi/af.cpp` (v0.5.2+rpt20250903).
+   A room light going on or off is such a change.
+
+In a dark room the lens does not hold still. With only the boards' LEDs lit, contrast and brightness are
+near zero, so the noise on them is enough to start a scan, and the lens drifts. That is accepted: the picture
+is too dark to use whatever the lens does, and the light coming back is a scene change, which starts a scan
+in the light. No dark threshold is added on top of libcamera's.
 
 Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v8, libcamera
 0.5.2+rpt20250903, files copied into the running system and `systemctl restart fpgas-cam`):
@@ -56,7 +65,10 @@ Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v
   both give a sharp picture. A second camera of the same kind is sharpest by hand at code 320, which is why
   one fixed position for the fleet cannot work.
 
-Not yet run: a start in the dark (only the board's LEDs lit).
+In the dark (5 and 6 Oct 2026, the same autofocus camera, frame brightness about 27 of 255 against about
+116 with the room light on): a start of the stream worked (lens chip found, one scan, stream up, no kernel
+errors); left alone, the lens was at codes 280, 292 and 388 at looks an hour apart; it had also scanned when
+the light went off.
 
 Two things that are deliberate:
 
