@@ -14,8 +14,9 @@ feed.** From this repository's [`gst-libcam.sh`](../gst-libcam.sh) and [`cam.ser
 2. if it finds neither after a few tries, exits with status 78. The unit does not restart on 78
    (`RestartPreventExitStatus=78`): a CSI camera can only be connected with the board off. After plugging in a
    USB grabber: `sudo systemctl restart fpgas-cam`;
-3. encodes H.264, with the hardware encoder where there is one and `x264enc` where there is not (a Pi 5),
-   with one keyframe per second, and a clock drawn over the picture;
+3. encodes H.264 at 6 frames per second (`FPS`, default 6), with the hardware encoder (`v4l2h264enc`) where
+   there is one and `x264enc` where there is not (a Pi 5), with one keyframe per second, and a clock
+   (`clockoverlay`) drawn over the picture;
 4. publishes to `rtmp://<the Pi's default gateway>/pib/<the Pi's short name>`.
 
 Any other failure (the stream server restarting, say) is retried every second.
@@ -27,8 +28,21 @@ Any other failure (the stream server restarting, say) is retried every second.
 is set (in `host_vars/fpgas.online.yml`, so on tweed), `webrtc` runs mediamtx, which serves the same streams
 over WebRTC (WHEP).
 
+The HLS under `/live` is served with `Cache-Control: no-cache`, because a cached live playlist is stale by
+definition (`stream_server`, `live-hls.conf.j2`, infra main, read 2026-10-07). The board pages embed that
+playlist, and each also offers the direct URL for a desktop player, `vlc https://<domain>/live/pi<N>.m3u8`
+(from the earlier docs page, not re-checked).
+
 On the gateway, `systemctl status nginx mediamtx` and `journalctl -u nginx` show whether a stream arrives; on
 the Pi, `journalctl -u fpgas-cam` shows the pipeline's own messages.
+
+## Latency
+
+Latency is a deliberate trade. nginx-rtmp can only cut an HLS fragment at a keyframe, so the GOP length is
+the floor on fragment length, and the player starts three fragments behind the newest. A 60-frame GOP at
+6 fps meant 10-second fragments and about 40 seconds glass-to-glass (measured 2026-08-30); one keyframe per
+second plus a 900 ms server fragment brings that to roughly 5 seconds (header comment of `gst-libcam.sh`,
+main 4e75e21, read 2026-10-07). The WebRTC path above is separate.
 
 ## Which Pis have a camera
 
