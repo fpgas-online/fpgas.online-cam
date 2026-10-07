@@ -40,7 +40,9 @@ def board(tmp_path):
             ["bash", str(SCRIPT)], capture_output=True, text=True, timeout=30,
             env={"PATH": f"{stub}:/usr/bin:/bin", "GST_LAUNCH": "echo",
                  "RTMP_DEST": "rtmp://127.0.0.1/pib/test",
-                 "V4L_SYSFS": str(sysfs), "V4L_BYID": str(byid), "CAM_WAIT_SECS": "0", **env})
+                 "V4L_SYSFS": str(sysfs), "V4L_BYID": str(byid), "CAM_WAIT_SECS": "0",
+                 "CAM_LENS": "true",  # no lens motor, unless a test says otherwise
+                 **env})
 
     # Every Pi has the codec/ISP nodes whether or not a camera is attached.
     node("video10", "bcm2835-codec-decode")
@@ -140,3 +142,109 @@ def test_width_height_override_applies_on_both_encode_paths(board, encoder):
     r = board(CAM_SRC="videotestsrc is-live=true", WIDTH="320", HEIGHT="240", encoder=encoder)
     assert r.returncode == 0, r.stderr
     assert sized(320, 240) in r.stdout.split()
+
+
+# --- lens motor (fpgas-cam-lens) ---------------------------------------------
+# gst-libcam.sh asks ${CAM_LENS} about a CSI camera before it starts the
+# pipeline. The helper prints a libcamera tuning file when it has bound a lens
+# driver, nothing for a fixed-focus camera, and exits non-zero when a lens
+# answered but could not be set up. tests/test_cam_lens.py covers the helper.
+
+def lens_helper(tmp_path, body):
+    helper = tmp_path / "fpgas-cam-lens"
+    helper.write_text(f"#!/bin/sh\necho called >> {tmp_path}/lens-calls\n{body}\n")
+    helper.chmod(0o755)
+    return str(helper)
+
+
+def test_csi_camera_with_a_lens_motor_streams_with_autofocus(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    tuning = tmp_path / "ov5647_af.json"
+    tuning.write_text("{}")
+    helper = lens_helper(tmp_path, f"echo {tuning}")
+    launch = tmp_path / "gst-launch"  # stands in for gst-launch-1.0: prints the tuning file libcamera would read
+    launch.write_text('#!/bin/sh\necho "tuning=${LIBCAMERA_RPI_TUNING_FILE}"\n')
+    launch.chmod(0o755)
+    r = board(encoder="sw", CAM_LENS=helper, GST_LAUNCH=str(launch))
+    assert r.stdout.strip() == f"tuning={tuning}", r.stderr
+    r = board(encoder="sw", CAM_LENS=helper)
+    assert r.returncode == 0, r.stderr
+    words = r.stdout.split()
+    assert words[:2] == ["libcamerasrc", "af-mode=continuous"]
+    assert sized(640, 540) in words  # still the CSI software-encode size
+
+
+def test_fixed_focus_csi_camera_streams_as_before(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    r = board(encoder="sw", CAM_LENS=lens_helper(tmp_path, "exit 0"))
+    assert r.returncode == 0, r.stderr
+    words = r.stdout.split()
+    assert words[0] == "libcamerasrc" and "af-mode=continuous" not in words
+    assert sized(640, 540) in words
+    assert (tmp_path / "lens-calls").read_text() == "called\n"
+
+
+def test_lens_that_cannot_be_set_up_is_reported_and_the_stream_still_starts(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    r = board(CAM_LENS=lens_helper(tmp_path, "echo 'fpgas-cam-lens: FAILED to bind the lens driver' >&2; exit 1"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[0] == "libcamerasrc" and "af-mode=continuous" not in r.stdout.split()
+    assert "failed (exit 1, see above): streaming without autofocus" in r.stderr
+
+
+def test_usb_grabber_and_cam_src_override_never_ask_about_a_lens(board, tmp_path):
+    helper = lens_helper(tmp_path, "exit 0")
+    board.node("video0", "UVC Camera (345f:2109): USB Vid")
+    (board.byid / "usb-MACROSILICON_2109-video-index0").touch()
+    assert board(CAM_LENS=helper).returncode == 0
+    assert board(CAM_LENS=helper, CAM_SRC="videotestsrc is-live=true").returncode == 0
+    assert not (tmp_path / "lens-calls").exists()
+
+
+def test_missing_lens_helper_is_reported_and_the_stream_still_starts(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    r = board(CAM_LENS=str(tmp_path / "not-installed"))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[0] == "libcamerasrc" and "af-mode=continuous" not in r.stdout.split()
+    assert "failed (exit 127, see above): streaming without autofocus" in r.stderr
+
+
+def test_tuning_path_that_is_not_a_file_is_not_given_to_libcamera(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    launch = tmp_path / "gst-launch"
+    launch.write_text('#!/bin/sh\necho "tuning=${LIBCAMERA_RPI_TUNING_FILE:-unset}"\n')
+    launch.chmod(0o755)
+    r = board(CAM_LENS=lens_helper(tmp_path, "echo /run/fpgas-cam/not-there.json"), GST_LAUNCH=str(launch))
+    assert r.stdout.strip() == "tuning=unset", r.stderr
+    assert "which is not a file" in r.stderr
+
+
+def test_csi_flag_is_not_inherited_from_the_environment(board):
+    board.node("video0", "UVC Camera (345f:2109): USB Vid")
+    (board.byid / "usb-MACROSILICON_2109-video-index0").touch()
+    r = board(encoder="sw", CSI="1")
+    assert r.returncode == 0, r.stderr
+    assert not any(w.startswith("video/x-raw,width=") for w in r.stdout.split())
+
+
+def test_camera_left_unbound_by_a_killed_helper_is_bound_again_before_the_wait(board, tmp_path):
+    # No sensor node at the start: the killed helper had unbound the camera. The stub's --recover makes the node
+    # appear, as binding the drivers again does, so the script only finds a camera if it asked for recovery first.
+    note = tmp_path / "lens-unbound.json"
+    note.write_text("{}")
+    sensor = tmp_path / "video4linux" / "v4l-subdev0"
+    helper = lens_helper(tmp_path, f'echo "args:$*" >> {tmp_path}/lens-args\n'
+                         f'if [ "$1" = --recover ]; then rm {note}; mkdir {sensor}; '
+                         f'echo "ov5647 10-0036" > {sensor}/name; echo not-a-path; fi')
+    r = board(CAM_LENS=helper, CAM_LENS_NOTE=str(note), CAM_WAIT_TRIES="1")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split()[0] == "libcamerasrc"  # and the recovery's stdout went nowhere near the pipeline
+    assert (tmp_path / "lens-args").read_text() == "args:--recover\nargs:\n"
+
+
+def test_no_note_no_recovery_call(board, tmp_path):
+    board.node("v4l-subdev0", "ov5647 10-0036")
+    helper = lens_helper(tmp_path, f'echo "args:$*" >> {tmp_path}/lens-args')
+    r = board(CAM_LENS=helper, CAM_LENS_NOTE=str(tmp_path / "no-note.json"))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "lens-args").read_text() == "args:\n"

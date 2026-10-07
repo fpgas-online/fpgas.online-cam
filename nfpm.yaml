@@ -10,6 +10,13 @@ depends:
   - gstreamer1.0-plugins-base
   - gstreamer1.0-plugins-good
   - libcamera-tools
+  # fpgas-cam-lens: python3; dtc and dtoverlay for the runtime overlay
+  # (dtoverlay is in raspi-utils-dt, or in libraspberrypi-bin on older
+  # bookworm images); modprobe (kmod) for i2c-dev while it asks the lens chip
+  - python3
+  - device-tree-compiler
+  - raspi-utils-dt | libraspberrypi-bin
+  - kmod
 contents:
   - src: cam.sh
     dst: /usr/local/bin/fpgas-cam.sh
@@ -23,6 +30,12 @@ contents:
     dst: /usr/local/bin/fpgas-gst-libcam-yt.sh
     file_info:
       mode: 0755
+  - src: cam-lens.py
+    dst: /usr/local/bin/fpgas-cam-lens
+    file_info:
+      mode: 0755
+  - src: af/ov5647.json
+    dst: /usr/share/fpgas-online/cam/af/ov5647.json
   - src: cam.service
     dst: /usr/lib/systemd/system/fpgas-cam.service
 scripts:

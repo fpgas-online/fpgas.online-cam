@@ -14,4 +14,4 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Run tests
-        run: uv run --no-project --with pytest pytest -v tests/test_source_select.py
+        run: uv run --no-project --with pytest pytest -v tests/test_source_select.py tests/test_cam_lens.py

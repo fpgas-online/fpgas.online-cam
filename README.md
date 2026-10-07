@@ -14,6 +14,95 @@ Provides the camera capture pipeline that streams live video from Raspberry Pi c
 | `gst-libcam-yt.sh` | GStreamer pipeline for YouTube live streaming |
 | `cam.sh` | Wrapper script for camera capture |
 | `cam.service` | systemd service unit for automatic camera startup |
+| `cam-lens.py` | Installed as `fpgas-cam-lens`: finds out whether the CSI camera has a lens motor and hands the lens to libcamera (below) |
+| `af/ov5647.json` | The autofocus section added to libcamera's stock OV5647 tuning for modules with a lens motor |
+
+## Lens motor (autofocus cameras)
+
+Some boards carry an OV5647 module with a lens motor (the Acorn hosts at Welland), others the fixed-focus
+module. Every Pi boots the same image and `config.txt`, and cameras get swapped, so the stream finds out for
+itself at every start, on the Pi, and keeps no per-board focus setting anywhere:
+
+1. `gst-libcam.sh` finds a CSI camera and runs `fpgas-cam-lens`.
+2. `fpgas-cam-lens` looks in the device tree for a lens motor node beside the bound sensor. The firmware's
+   `ov5647` overlay always describes one (`ad5398@c`), disabled. It then asks the chip itself: a short capture
+   powers the camera (the chip is silent without it) and the lens address is read over I2C.
+3. The address stays unacknowledged over several reads while the camera is delivering frames: a fixed-focus
+   camera. Nothing is bound or changed, the answer is remembered in `/run/fpgas-cam/` for this boot, and the
+   stream starts as it always did. The cost is the probe itself, once per boot: a few seconds before the first
+   start of the stream. Anything else (no frames, the I2C bus cannot be opened, reads failing some other way)
+   is "could not ask", not "fixed-focus": it is an error, is not remembered, and the next start asks again.
+4. An answer: the camera receiver and the sensor are unbound, a runtime device-tree overlay makes the two
+   changes the overlay's `vcm` parameter would have made (lens node to `okay`, `lens-focus` on the sensor), and
+   both are bound again. A lens sub-device with a focus control appears. The helper writes
+   `/run/fpgas-cam/<sensor>_af.json` (the stock libcamera tuning plus `af/<sensor>.json`) and prints its path.
+5. `gst-libcam.sh` then runs `libcamerasrc af-mode=continuous` with that tuning file. libcamera scans for the
+   sharpest lens position from the picture when the stream starts. After that it scans again only after the
+   scene has changed and then held still: a change is the picture's contrast, or its mean red, green or blue,
+   falling below `retrigger_ratio` (0.3 here, so to under about a third) of its reference value or rising
+   above the reference by the same factor (`new + 1 < 0.3 * old` or `old + 1 < 0.3 * new`); each change
+   becomes the new reference, and a scan starts once `retrigger_delay` frames (60, 10 s at 6 fps) pass with
+   no further change. That is `Af::doAF` in libcamera's `src/ipa/rpi/controller/rpi/af.cpp`
+   (v0.5.2+rpt20250903). A room light going on or off is such a change (frame brightness about 27 against
+   about 116 of 255 here).
+
+In a dark room the lens does not hold still. With only the boards' LEDs lit, contrast and brightness are
+near zero, so the noise on them is enough to start a scan, and the lens drifts. That is accepted: the picture
+is too dark to use whatever the lens does. No dark threshold is added on top of libcamera's.
+
+**Only a large change of light starts a new focus scan.** With `retrigger_ratio` 0.3 the scene has to change
+by about 3.3 times. Measured over the autofocus camera at Welland, 7 and 8 Oct 2026, in mean frame brightness
+(0 to 255): dark, only the boards' LEDs, 23 to 29; the room light about 116. The room light going off started a
+scan (7 Oct, about 23:00). The next morning dim daylight (43 to 62, 07:15 to 08:02) did not, and the lens stayed
+where the dark had left it (lens code 500, picture soft). When the daylight reached about 85 (08:17) it did, and
+the lens came to 312, sharp, as in the room light (310 to 353). So the picture can stay soft through the first
+hour or so of a dim morning. A smaller ratio would refocus sooner, at the risk of the frequent re-scans of a
+large one (see `af/ov5647.json`); it has not been tried.
+
+Run on hardware with this code (5 Oct 2026, two Pi 5s, kernel 6.12.109+rpt-rpi-v8, libcamera
+0.5.2+rpt20250903, files copied into the running system and `systemctl restart fpgas-cam`):
+
+- Fixed-focus OV5647: the helper logged "no chip answers at 0x0c while the camera is streaming: fixed-focus
+  camera", changed nothing, and the stream started with the stock tuning as before.
+- Autofocus OV5647 about 10 cm above an Acorn: the helper logged "a lens chip answers at 0x0c: binding its
+  driver", unbound and bound receiver and sensor, and an `ad5398 focus` sub-device appeared; the stream started
+  with `af-mode=continuous` and `/run/fpgas-cam/ov5647_af.json`, scanned, and came to rest at lens code 310
+  within about 15 s; it then held that code for the 190 s it was watched. The picture is sharp (LEDs, part
+  markings and a QR code readable). A second start in the same boot logged "lens driver already bound" and
+  focused again.
+- With libcamera's stock re-trigger values the lens re-scanned about every 80 s on that still scene and rested
+  at a different code each time (302 to 374); `af/ov5647.json` therefore scans once at start and holds.
+- A hand sweep of the same camera the evening before found code 384 sharpest and libcamera chooses about 310;
+  both give a sharp picture. A second camera of the same kind is sharpest by hand at code 320, which is why
+  one fixed position for the fleet cannot work.
+
+In the dark (5 and 6 Oct 2026, the same autofocus camera, frame brightness about 27 of 255 against about
+116 with the room light on): a start of the stream worked (lens chip found, one scan, stream up, no kernel
+errors); left alone, the lens was at codes 280, 292 and 388 at looks an hour apart; it had also scanned when
+the light went off.
+
+Things that are deliberate:
+
+- **The receiver is unbound together with the sensor.** Re-probing only the sensor while `rp1-cfe` stays bound
+  makes the receiver register its video devices a second time; the kernel oopses in `cfe_async_complete` and
+  the Pi then hangs in shutdown until it is power-cycled. Never do that.
+- **A lens that answers but cannot be set up is an error**, and so is a camera that could not be asked
+  (`fpgas-cam-lens` exits 1 and says why); the stream still starts, unfocused, and says so in the journal. A
+  failed set-up is remembered for the boot, so a restarting stream does not unbind and bind the camera drivers
+  again and again. A fixed-focus camera is not an error.
+- **The unbind-to-bind step cannot be cut short.** Termination signals are held off while the receiver and the
+  sensor are unbound, what was unbound is noted in `/run/fpgas-cam/` first, and a later run that finds the note
+  binds both again before doing anything else. A run that was killed outright leaves no sensor to find, so
+  `gst-libcam.sh` runs `fpgas-cam-lens --recover` when the note exists, before it looks for a camera. The
+  overlay tools run under a time limit. Only one `fpgas-cam-lens` runs at a time.
+
+A board with two CSI cameras is not handled: the helper takes the first sensor with a lens node, libcamera
+streams its own first camera, and they need not be the same. No fleet board has two.
+
+Pi 3 and Pi 4 hosts (unicam receiver, VC4 tuning): a fixed-focus camera there is found to be one and left as it
+was. A lens that answers behind any receiver other than `rp1-cfe` is an error: unbinding unicam has never been
+tried, so the helper says so, unbinds nothing, and the stream starts unfocused (`TESTED_RECEIVERS` in
+`cam-lens.py`).
 
 ## Packaging
 
@@ -40,6 +129,7 @@ This is normally handled by the [fpgas.online-infra](https://github.com/fpgas-on
 - `gstreamer1.0-plugins-base`
 - `gstreamer1.0-plugins-good`
 - `libcamera-tools`
+- `python3`, `device-tree-compiler`, `raspi-utils-dt` (or `libraspberrypi-bin`), `kmod` (for `fpgas-cam-lens`)
 
 ## Linting
 
